@@ -211,6 +211,25 @@ describe("AIHelper", function()
                 assert.is_not_nil(requests[1].headers["HTTP-Referer"])
                 assert.are.equal("KOReader X-Ray", requests[1].headers["X-Title"])
                 assert.is_nil(requests[1].headers["X-OpenRouter-Title"])
+                assert.are.equal("text/event-stream", requests[1].headers["Accept"])
+                assert.are.equal("openai", requests[1].stream_format)
+                assert.is_true(require("json").decode(requests[1].body).stream)
+            end)
+
+            it("does not enable streaming for other custom endpoints", function()
+                AIHelper.providers.custom1.endpoint = "https://example.com/v1/chat/completions"
+                local requests = AIHelper:buildComprehensiveRequest("Title", "Author", {})
+                assert.is_nil(requests[1].stream_format)
+                assert.is_nil(require("json").decode(requests[1].body).stream)
+            end)
+
+            it("enables Anthropic streaming for OpenRouter Messages endpoints", function()
+                AIHelper.providers.custom1.endpoint = "https://openrouter.ai/api/v1/messages"
+                AIHelper.providers.custom1.format = "anthropic"
+                local requests = AIHelper:buildComprehensiveRequest("Title", "Author", {})
+                assert.are.equal("anthropic", requests[1].stream_format)
+                assert.are.equal("text/event-stream", requests[1].headers["Accept"])
+                assert.is_true(require("json").decode(requests[1].body).stream)
             end)
         end)
 
@@ -254,6 +273,69 @@ describe("AIHelper", function()
             end)
         end)
 
+    end)
+
+    describe("OpenRouter stream normalization", function()
+        local json = require("json")
+
+        it("reconstructs an OpenAI-compatible streamed response", function()
+            local stream = table.concat({
+                ": OPENROUTER PROCESSING",
+                "data: " .. json.encode({ choices = {{ delta = { content = '{"characters":' } }} }),
+                "data: " .. json.encode({ choices = {{ delta = { content = "[]}" }, finish_reason = "stop" }} }),
+                "data: [DONE]",
+                "",
+            }, "\r\n")
+
+            local normalized = AIHelper:normalizeOpenRouterStream(stream, "openai")
+            assert.is_not_nil(normalized)
+            local response = json.decode(normalized)
+            assert.are.equal('{"characters":[]}', response.choices[1].message.content)
+        end)
+
+        it("reconstructs an Anthropic Messages streamed response", function()
+            local stream = table.concat({
+                "event: content_block_start",
+                "data: " .. json.encode({
+                    type = "content_block_start",
+                    content_block = { type = "text", text = '{"locations":' },
+                }),
+                "event: content_block_delta",
+                "data: " .. json.encode({
+                    type = "content_block_delta",
+                    delta = { type = "text_delta", text = "[]}" },
+                }),
+                "event: message_stop",
+                "data: " .. json.encode({ type = "message_stop" }),
+                "",
+            }, "\n")
+
+            local normalized = AIHelper:normalizeOpenRouterStream(stream, "anthropic")
+            assert.is_not_nil(normalized)
+            local response = json.decode(normalized)
+            assert.are.equal('{"locations":[]}', response.content[1].text)
+        end)
+
+        it("surfaces mid-stream provider errors", function()
+            local stream = "data: " .. json.encode({
+                error = { code = 502, message = "Provider disconnected" },
+                choices = {{ delta = { content = "" }, finish_reason = "error" }},
+            }) .. "\n"
+
+            local normalized, err = AIHelper:normalizeOpenRouterStream(stream, "openai")
+            assert.is_nil(normalized)
+            assert.are.equal("Provider disconnected", err)
+        end)
+
+        it("rejects incomplete streams instead of accepting partial output", function()
+            local stream = "data: " .. json.encode({
+                choices = {{ delta = { content = '{"characters":[]}' } }},
+            }) .. "\n"
+
+            local normalized, err = AIHelper:normalizeOpenRouterStream(stream, "openai")
+            assert.is_nil(normalized)
+            assert.are.equal("OpenRouter stream ended before completion", err)
+        end)
     end)
 
     describe("async child cancellation", function()

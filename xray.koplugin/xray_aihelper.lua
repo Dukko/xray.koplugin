@@ -238,7 +238,7 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
     for _, ai in ipairs({ primary, secondary }) do
         local config = self.providers[ai.provider]
         if config and config.api_key and config.api_key ~= "" then
-            local url, headers, body
+            local url, headers, body, stream_format
             local resolved_model = self:resolveModel(ai.provider, ai.model)
             if ai.provider == "gemini" then
                 local model = resolved_model or DEFAULT_AI.primary.model
@@ -306,11 +306,11 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                     headers["Authorization"] = "Bearer " .. config.api_key
                 end
                 
-                if ai.provider == "custom1" or ai.provider == "custom2" then
-                    if (config.endpoint or ""):find("openrouter.ai") then
-                        headers["HTTP-Referer"]      = "https://github.com/koreader/koreader-xray-plugin"
-                        headers["X-Title"] = "KOReader X-Ray"
-                    end
+                local is_openrouter = (ai.provider == "custom1" or ai.provider == "custom2")
+                    and (config.endpoint or ""):find("openrouter.ai", 1, true)
+                if is_openrouter then
+                    headers["HTTP-Referer"] = "https://github.com/koreader/koreader-xray-plugin"
+                    headers["X-Title"] = "KOReader X-Ray"
                 end
                 
                 local system_instruction_text = (self.prompts and self.prompts.system_instruction or "Return valid JSON ONLY.") .. " You MUST output strictly valid JSON, starting with '{'."
@@ -351,6 +351,11 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                 local is_reasoning = self.settings and self.settings[ai.provider .. "_is_reasoning"]
                 if is_reasoning then
                     req_body.max_tokens = 32000
+                end
+                if is_openrouter then
+                    req_body.stream = true
+                    headers["Accept"] = "text/event-stream"
+                    stream_format = "anthropic"
                 end
                 
                 body = json.encode(req_body)
@@ -412,9 +417,12 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                 end
                 
                 if ai.provider == "custom1" or ai.provider == "custom2" then
-                    if (config.endpoint or ""):find("openrouter.ai") then
+                    if (config.endpoint or ""):find("openrouter.ai", 1, true) then
                         headers["HTTP-Referer"]      = "https://github.com/koreader/koreader-xray-plugin"
                         headers["X-Title"] = "KOReader X-Ray"
+                        headers["Accept"] = "text/event-stream"
+                        req_body.stream = true
+                        stream_format = "openai"
                     end
                     -- Per-slot "Is Reasoning Model" setting: raise token ceiling to accommodate reasoning chains
                     local is_reasoning = self.settings and self.settings[ai.provider .. "_is_reasoning"]
@@ -426,7 +434,14 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                 
                 body = json.encode(req_body)
             end
-            table.insert(requests, { url = url, headers = headers, body = body, provider = ai.provider, model = resolved_model or ai.model })
+            table.insert(requests, {
+                url = url,
+                headers = headers,
+                body = body,
+                provider = ai.provider,
+                model = resolved_model or ai.model,
+                stream_format = stream_format,
+            })
         end
     end
     
@@ -527,6 +542,81 @@ function AIHelper:_scheduleAsyncChildReap(pid)
     return true
 end
 
+function AIHelper:normalizeOpenRouterStream(response_text, stream_format)
+    if stream_format ~= "openai" and stream_format ~= "anthropic" then
+        return nil, "Unsupported OpenRouter stream format"
+    end
+
+    local content = {}
+    local stream_complete = false
+
+    for line in ((response_text or "") .. "\n"):gmatch("(.-)\n") do
+        line = line:gsub("\r$", "")
+        if line:sub(1, 5) == "data:" then
+            local payload = line:sub(6):match("^%s*(.-)%s*$")
+            if payload == "[DONE]" then
+                stream_complete = true
+            elseif payload ~= "" then
+                local ok, event = pcall(json.decode, payload)
+                if not ok or type(event) ~= "table" then
+                    return nil, "OpenRouter returned malformed stream data"
+                end
+                if event.error then
+                    local message = type(event.error) == "table" and event.error.message or event.error
+                    return nil, tostring(message or "OpenRouter stream failed")
+                end
+
+                if stream_format == "openai" then
+                    local choice = event.choices and event.choices[1]
+                    local delta = choice and choice.delta
+                    if delta and type(delta.content) == "string" then
+                        table.insert(content, delta.content)
+                    end
+                    if choice and choice.finish_reason == "error" then
+                        return nil, "OpenRouter stream failed"
+                    end
+                else
+                    if event.type == "content_block_start"
+                        and event.content_block
+                        and type(event.content_block.text) == "string" then
+                        table.insert(content, event.content_block.text)
+                    elseif event.type == "content_block_delta"
+                        and event.delta
+                        and event.delta.type == "text_delta"
+                        and type(event.delta.text) == "string" then
+                        table.insert(content, event.delta.text)
+                    elseif event.type == "message_stop" then
+                        stream_complete = true
+                    elseif event.type == "error" then
+                        return nil, "OpenRouter stream failed"
+                    end
+                end
+            end
+        end
+    end
+
+    if not stream_complete then
+        return nil, "OpenRouter stream ended before completion"
+    end
+
+    local text = table.concat(content)
+    if text == "" then
+        return nil, "OpenRouter stream returned no text"
+    end
+
+    if stream_format == "anthropic" then
+        return json.encode({
+            content = {{ type = "text", text = text }},
+        })
+    end
+    return json.encode({
+        choices = {{
+            finish_reason = "stop",
+            message = { role = "assistant", content = text },
+        }},
+    })
+end
+
 -- Fork a child process to perform the HTTP request. Returns true if started.
 function AIHelper:makeRequestAsync(request_params, result_file)
     if self._async_child_pid and not self:_reapAsyncChild(self._async_child_pid) then
@@ -589,6 +679,19 @@ function AIHelper:makeRequestAsync(request_params, result_file)
                             "AIHelper Child: Incomplete response from %s — got %d bytes, expected %d. Treating as failure.",
                             req.provider, #response_text, clen))
                         code_num = nil -- prevents falling into the code_num==200 block below
+                    end
+                end
+
+                if code_num == 200 and req.stream_format then
+                    local normalized, stream_error = self:normalizeOpenRouterStream(response_text, req.stream_format)
+                    if normalized then
+                        response_text = normalized
+                    else
+                        code = 502
+                        code_num = 502
+                        response_text = json.encode({
+                            error = { message = stream_error },
+                        })
                     end
                 end
 
