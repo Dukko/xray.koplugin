@@ -257,22 +257,29 @@ describe("AIHelper", function()
     end)
 
     describe("async child cancellation", function()
-        it("terminates, reaps, and cleans only the expected child", function()
+        it("terminates immediately and reaps only the expected child in the background", function()
             local old_ffiutil = package.loaded["ffi/util"]
             local old_kill = AIHelper._killAsyncPID
+            local UIManager = require("ui/uimanager")
+            local old_schedule = UIManager.scheduleIn
             local calls = {}
+            local scheduled = {}
+            local reap_results = { false, false, true }
             package.loaded["ffi/util"] = {
                 terminateSubProcess = function(pid)
                     table.insert(calls, { action = "terminate", pid = pid })
                 end,
                 isSubProcessDone = function(pid, wait)
                     table.insert(calls, { action = "reap", pid = pid, wait = wait })
-                    return true
+                    return table.remove(reap_results, 1)
                 end,
             }
-            AIHelper._killAsyncPID = function(self, pid, wait)
-                table.insert(calls, { action = "kill", pid = pid, wait = wait })
+            AIHelper._killAsyncPID = function(self, pid)
+                table.insert(calls, { action = "kill", pid = pid })
                 return true
+            end
+            UIManager.scheduleIn = function(self, delay, callback)
+                table.insert(scheduled, callback)
             end
 
             local result_file = os.tmpname()
@@ -290,22 +297,36 @@ describe("AIHelper", function()
                 assert.are.equal(0, #calls)
 
                 assert.is_true(AIHelper:cancelAsyncChild(4321))
-                assert.are.equal("kill", calls[1].action)
+                assert.are.equal("terminate", calls[1].action)
+                assert.are.equal("kill", calls[2].action)
                 assert.are.equal(4321, calls[1].pid)
-                assert.is_false(calls[1].wait)
-                assert.are.equal("terminate", calls[2].action)
                 assert.are.equal("reap", calls[3].action)
-                assert.is_true(calls[3].wait)
+                assert.is_nil(calls[3].wait)
                 assert.is_nil(AIHelper._async_child_pid)
                 assert.is_nil(AIHelper._async_result_file)
                 assert.is_nil(io.open(result_file, "r"))
+                assert.are.equal(1, #scheduled)
+
+                table.remove(scheduled, 1)()
+                assert.are.equal("reap", calls[4].action)
+                assert.is_nil(calls[4].wait)
+                assert.are.equal(1, #scheduled)
+                assert.is_true(AIHelper._async_children_to_reap[4321])
+
+                table.remove(scheduled, 1)()
+                assert.are.equal("reap", calls[5].action)
+                assert.is_nil(calls[5].wait)
+                assert.is_nil(AIHelper._async_children_to_reap)
+                assert.are.equal(0, #scheduled)
             end)
 
             package.loaded["ffi/util"] = old_ffiutil
             AIHelper._killAsyncPID = old_kill
+            UIManager.scheduleIn = old_schedule
             AIHelper._async_child_pid = nil
             AIHelper._async_child_uses_process_group = nil
             AIHelper._async_result_file = nil
+            AIHelper._async_children_to_reap = nil
             pcall(function() os.remove(result_file) end)
             if not ok then error(err) end
         end)

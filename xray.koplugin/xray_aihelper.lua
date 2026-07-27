@@ -463,53 +463,73 @@ function AIHelper:_clearAsyncChildState(pid)
     end
 end
 
--- Reap a completed child without touching a newer request that may have
--- replaced it. When wait is true, this blocks until the child exits.
-function AIHelper:_reapAsyncChild(pid, wait)
-    if not pid or self._async_child_pid ~= pid then return false end
-
+function AIHelper:_isAsyncChildDone(pid)
     local ffiutil = getFFIUtil()
     if ffiutil and ffiutil.isSubProcessDone then
-        local ok, done = pcall(ffiutil.isSubProcessDone, pid, wait == true)
-        if ok and done then
-            self:_clearAsyncChildState(pid)
-            return true
-        end
+        local ok, done = pcall(ffiutil.isSubProcessDone, pid)
+        if ok then return done == true end
     end
 
     local ok, done = pcall(function()
         local ffi = require("ffi")
         ffi.cdef[[ int waitpid(int pid, int *status, int options); ]]
-        local result = ffi.C.waitpid(pid, nil, wait and 0 or 1)
+        local result = ffi.C.waitpid(pid, nil, 1) -- WNOHANG
         return result == pid or result == -1
     end)
-    if ok and done then
+    return ok and done == true
+end
+
+-- Reap a completed child without touching a newer request that may have
+-- replaced it.
+function AIHelper:_reapAsyncChild(pid)
+    if not pid or self._async_child_pid ~= pid then return false end
+
+    if self:_isAsyncChildDone(pid) then
         self:_clearAsyncChildState(pid)
         return true
     end
     return false
 end
 
-function AIHelper:_killAsyncPID(pid, wait)
-    local ok, done = pcall(function()
+function AIHelper:_killAsyncPID(pid)
+    local ok, result = pcall(function()
         local ffi = require("ffi")
-        ffi.cdef[[
-            int kill(int pid, int sig);
-            int waitpid(int pid, int *status, int options);
-        ]]
-        local kill_result = ffi.C.kill(pid, 9) -- SIGKILL
-        if not wait then
-            return kill_result == 0 or kill_result == -1
-        end
-        local wait_result = ffi.C.waitpid(pid, nil, 0)
-        return kill_result == 0 or wait_result == pid or wait_result == -1
+        ffi.cdef[[ int kill(int pid, int sig); ]]
+        return ffi.C.kill(pid, 9) -- SIGKILL
     end)
-    return ok and done == true
+    return ok and result == 0
+end
+
+function AIHelper:_scheduleAsyncChildReap(pid)
+    self._async_children_to_reap = self._async_children_to_reap or {}
+    if self._async_children_to_reap[pid] then return true end
+    self._async_children_to_reap[pid] = true
+
+    local ok, UIManager = pcall(require, "ui/uimanager")
+    if not ok or not UIManager or not UIManager.scheduleIn then
+        self._async_children_to_reap[pid] = nil
+        return false
+    end
+
+    local collect
+    collect = function()
+        if self:_isAsyncChildDone(pid) then
+            self._async_children_to_reap[pid] = nil
+            if not next(self._async_children_to_reap) then
+                self._async_children_to_reap = nil
+            end
+            self:log("AIHelper: Collected async child process PID " .. tostring(pid))
+        else
+            UIManager:scheduleIn(0.1, collect)
+        end
+    end
+    UIManager:scheduleIn(0.1, collect)
+    return true
 end
 
 -- Fork a child process to perform the HTTP request. Returns true if started.
 function AIHelper:makeRequestAsync(request_params, result_file)
-    if self._async_child_pid and not self:_reapAsyncChild(self._async_child_pid, false) then
+    if self._async_child_pid and not self:_reapAsyncChild(self._async_child_pid) then
         self:log("AIHelper: Cannot start async request while PID " .. tostring(self._async_child_pid) .. " is still active")
         return false
     end
@@ -849,7 +869,12 @@ function AIHelper:checkAsyncResult(result_file, expected_pid)
     local tracked_pid = self._async_child_pid
     local owns_result = not self._async_result_file or self._async_result_file == result_file
     if tracked_pid and owns_result and (not expected_pid or expected_pid == tracked_pid) then
-        self:_reapAsyncChild(tracked_pid, true)
+        if not self:_reapAsyncChild(tracked_pid) then
+            self:_clearAsyncChildState(tracked_pid)
+            if not self:_scheduleAsyncChildReap(tracked_pid) then
+                self:log("AIHelper: Could not schedule collection of completed child PID " .. tostring(tracked_pid))
+            end
+        end
     end
 
     -- Parse: first line = code, second line = provider, rest = response body
@@ -935,26 +960,21 @@ function AIHelper:cancelAsyncChild(expected_pid)
 
     self:log("AIHelper: Cancelling async child process PID " .. tostring(pid))
     local result_file = self._async_result_file
-    local cancelled = false
+    local termination_requested = false
     local ffiutil = getFFIUtil()
 
     if self._async_child_uses_process_group and ffiutil
-        and ffiutil.terminateSubProcess and ffiutil.isSubProcessDone then
-        local ok, done = pcall(function()
-            -- runInSubProcess creates the process group inside the child.
-            -- Also signal the PID directly in case cancellation wins that race.
-            self:_killAsyncPID(pid, false)
+        and ffiutil.terminateSubProcess then
+        local ok = pcall(function()
             ffiutil.terminateSubProcess(pid)
-            return ffiutil.isSubProcessDone(pid, true)
         end)
-        cancelled = ok and done == true
+        termination_requested = ok
     end
+    -- runInSubProcess creates the process group inside the child. Also signal
+    -- the PID directly in case cancellation happens before setpgid().
+    termination_requested = self:_killAsyncPID(pid) or termination_requested
 
-    if not cancelled then
-        cancelled = self:_killAsyncPID(pid, true)
-    end
-
-    if not cancelled then
+    if not termination_requested and not self:_reapAsyncChild(pid) then
         self:log("AIHelper: Failed to terminate async child PID " .. tostring(pid))
         return false
     end
@@ -962,6 +982,9 @@ function AIHelper:cancelAsyncChild(expected_pid)
     self:_clearAsyncChildState(pid)
     if result_file then
         pcall(function() os.remove(result_file) end)
+    end
+    if not self:_isAsyncChildDone(pid) and not self:_scheduleAsyncChildReap(pid) then
+        self:log("AIHelper: Could not schedule collection of cancelled child PID " .. tostring(pid))
     end
     return true
 end
