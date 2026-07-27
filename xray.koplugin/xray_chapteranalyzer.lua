@@ -32,6 +32,18 @@ function ChapterAnalyzer:new(o)
     return o
 end
 
+-- Page ranges use different end semantics across KOReader document types.
+-- Reflowable extraction stops at the end XPointer, so the next page marks the
+-- end of the current page. Page-based extraction is inclusive and must stop on
+-- the current page to avoid reading one page ahead.
+function ChapterAnalyzer:getEndPageForCurrentPage(ui, current_page)
+    if not current_page then return nil end
+    if ui and ui.rolling ~= nil then
+        return current_page + 1
+    end
+    return current_page
+end
+
 -- Get current chapter/section text
 function ChapterAnalyzer:getCurrentChapterText(ui)
     if not ui or not ui.document then
@@ -791,7 +803,8 @@ function ChapterAnalyzer:getDetailedChapterSamples(ui, max_chapters, total_limit
 
             local success, chapter_text = pcall(function()
                 if is_current_chapter then
-                    return self:getTextFromPageRange(ui, chapter.page, current_page + 1, total_limit)
+                    local end_page = self:getEndPageForCurrentPage(ui, current_page)
+                    return self:getTextFromPageRange(ui, chapter.page, end_page, total_limit)
                 elseif ui.document.getTextFromXPointer and chapter.xpointer then
                     -- EPUB: Usually returns the full text of the chapter file
                     return ui.document:getTextFromXPointer(chapter.xpointer)
