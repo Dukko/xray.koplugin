@@ -3,6 +3,26 @@ local logger = require("logger")
 local plugin_path = ((...) or ""):match("(.-)[^%.]+$") or ""
 local AIHelper = require(plugin_path .. "xray_aihelper")
 
+-- Helper function to flatten KOReader's nested TOC tree
+local function flattenTOC(nodes, flat_list)
+    flat_list = flat_list or {}
+    if not nodes then return flat_list end
+    
+    for _, node in ipairs(nodes) do
+        table.insert(flat_list, node)
+        if type(node) == "table" then
+            if #node > 0 then
+                flattenTOC(node, flat_list)
+            elseif node.sub_item_table then
+                flattenTOC(node.sub_item_table, flat_list)
+            elseif node.children then
+                flattenTOC(node.children, flat_list)
+            end
+        end
+    end
+    return flat_list
+end
+
 local ChapterAnalyzer = {}
 
 function ChapterAnalyzer:new(o)
@@ -60,23 +80,27 @@ function ChapterAnalyzer:getReflowableText(ui)
     logger.info("ChapterAnalyzer: Current position:", current_pos)
     
     -- Try to get chapter from TOC
-    local toc = ui.document:getToc()
+    local raw_toc = ui.document:getToc()
+    local toc = flattenTOC(raw_toc)
     local default_chapter_title = ui.loc and ui.loc:t("this_chapter") or "This Chapter"
     if not toc or #toc == 0 then
         logger.info("ChapterAnalyzer: No TOC, using visible text")
         return self:getVisibleTextReflowable(ui), default_chapter_title
     end
     
-    -- Find current chapter
+    -- Find current chapter: select the chapter with page <= current_pos closest to current_pos
     local current_chapter = nil
+    local max_chapter_page = -1
     local chapter_title = default_chapter_title
     
-    for i, chapter in ipairs(toc) do
-        if chapter.page and chapter.page <= current_pos then
-            current_chapter = chapter
-            chapter_title = chapter.title or default_chapter_title
-        elseif chapter.page then
-            break
+    for _, chapter in ipairs(toc) do
+        if chapter.page then
+            local p = tonumber(chapter.page)
+            if p and p <= current_pos and p >= max_chapter_page then
+                max_chapter_page = p
+                current_chapter = chapter
+                chapter_title = chapter.title or default_chapter_title
+            end
         end
     end
     
@@ -186,7 +210,8 @@ end
 -- Get text from page-based documents (PDF, DJVU)
 function ChapterAnalyzer:getPageBasedText(ui)
     -- Try to get chapter from TOC
-    local toc = ui.document:getToc()
+    local raw_toc = ui.document:getToc()
+    local toc = flattenTOC(raw_toc)
     if not toc or #toc == 0 then
         logger.info("ChapterAnalyzer: No TOC, using current page only")
         return self:getCurrentPageTextPDF(ui)
@@ -195,16 +220,15 @@ function ChapterAnalyzer:getPageBasedText(ui)
     -- Find current chapter based on page
     local current_page = ui.paging:getCurrentPage()
     local current_chapter = nil
-    local next_chapter = nil
+    local max_chapter_page = -1
     
-    for i, chapter in ipairs(toc) do
-        if chapter.page and chapter.page <= current_page then
-            current_chapter = chapter
-            if i < #toc then
-                next_chapter = toc[i + 1]
+    for _, chapter in ipairs(toc) do
+        if chapter.page then
+            local p = tonumber(chapter.page)
+            if p and p <= current_page and p >= max_chapter_page then
+                max_chapter_page = p
+                current_chapter = chapter
             end
-        elseif chapter.page then
-            break
         end
     end
     
@@ -624,7 +648,8 @@ end
 function ChapterAnalyzer:getDetailedChapterSamples(ui, max_chapters, total_limit, is_full_book, start_page, known_chapters)
     if not ui or not ui.document then return nil, nil end
     
-    local toc = ui.document:getToc()
+    local raw_toc = ui.document:getToc()
+    local toc = flattenTOC(raw_toc)
     if not toc or #toc == 0 then 
         logger.info("ChapterAnalyzer: No TOC found for detailed sampling")
         return nil, nil 
@@ -672,38 +697,47 @@ function ChapterAnalyzer:getDetailedChapterSamples(ui, max_chapters, total_limit
     local chapter_titles = {}
     if toc and #toc > 0 then
         for i, chapter in ipairs(toc) do
-            if not is_full_book and current_page and chapter.page and chapter.page > current_page then
-                break
-            end
-            
-            -- Skip non-narrative chapters
-            if isNonNarrative(chapter.title) then
-                AIHelper:log("ChapterAnalyzer: Skipping non-narrative chapter: " .. (chapter.title or tostring(i)))
+            local ch_page = tonumber(chapter.page)
+            if not is_full_book and current_page and ch_page and ch_page > current_page then
+                -- Skip chapters past current_page without breaking (since TOC items may not be strictly page-ordered)
             else
-                local skip = false
-                if start_page and not is_full_book then
-                    local next_chapter_page = toc[i+1] and toc[i+1].page or math.huge
-                    if next_chapter_page <= start_page then
-                        -- ONLY skip if it's already in our data
-                        if known_chapters then
-                            local norm_title = normalize(chapter.title)
-                            if known_chapters[norm_title] then
+                -- Skip non-narrative chapters
+                if isNonNarrative(chapter.title) then
+                    AIHelper:log("ChapterAnalyzer: Skipping non-narrative chapter: " .. (chapter.title or tostring(i)))
+                else
+                    local skip = false
+                    if start_page and not is_full_book then
+                        -- Scan forward for the next TOC entry with a valid page number
+                        local next_chapter_page = math.huge
+                        for j = i + 1, #toc do
+                            local np = tonumber(toc[j].page)
+                            if np then
+                                next_chapter_page = np
+                                break
+                            end
+                        end
+                        if next_chapter_page <= start_page then
+                            -- ONLY skip if it's already in our data
+                            if known_chapters then
+                                local norm_title = normalize(chapter.title)
+                                if known_chapters[norm_title] then
+                                    skip = true
+                                end
+                            else
+                                -- Fallback to old behavior if no list provided
                                 skip = true
                             end
-                        else
-                            -- Fallback to old behavior if no list provided
-                            skip = true
                         end
                     end
-                end
-                
-                if not skip then
-                    if #active_chapters >= max_chapters then break end
-                    chapter.toc_index = i
-                    table.insert(active_chapters, chapter)
-                    table.insert(chapter_titles, chapter.title or tostring(i))
-                else
-                    AIHelper:log("ChapterAnalyzer: Skipping already-fetched chapter: " .. (chapter.title or tostring(i)))
+                    
+                    if not skip then
+                        if #active_chapters >= max_chapters then break end
+                        chapter.toc_index = i
+                        table.insert(active_chapters, chapter)
+                        table.insert(chapter_titles, chapter.title or tostring(i))
+                    else
+                        AIHelper:log("ChapterAnalyzer: Skipping already-fetched chapter: " .. (chapter.title or tostring(i)))
+                    end
                 end
             end
         end
@@ -784,7 +818,10 @@ function ChapterAnalyzer:getDetailedChapterSamples(ui, max_chapters, total_limit
         if max_range and max_range > 0 then
             local num_sections = math.min(20, max_range)
             local step = math.floor(max_range / num_sections)
-            AIHelper:log("ChapterAnalyzer: No TOC found. Using even sampling across " .. num_sections .. " sections.")
+            local log_msg = (toc and #toc > 0)
+                and ("ChapterAnalyzer: No un-fetched chapters found up to page " .. tostring(current_page) .. ". Using even sampling across " .. num_sections .. " sections.")
+                or ("ChapterAnalyzer: No TOC found. Using even sampling across " .. num_sections .. " sections.")
+            AIHelper:log(log_msg)
             
             for i = 1, num_sections do
                 local p = (i - 1) * step + 1

@@ -200,13 +200,37 @@ describe("xray_chapteranalyzer", function()
                 return "mock page text of page " .. page .. " which is long enough to count"
             end
 
-            local samples, titles = analyzer:getDetailedChapterSamples(mock_ui, 100, 60000, false)
-
             -- With current page = 25, the fallback even-sampling should step up to page 25
             -- Max page checked should be <= 25
             for _, page in ipairs(getPageText_calls) do
                 assert.is_true(page <= 25)
             end
         end)
+
+        it("handles nested TOCs where parent nodes have higher page numbers than child chapters", function()
+            -- Mock nested TOC hierarchy like "Heroes, The": Part I (page 50) -> Chapter 1 (page 10), Chapter 2 (page 30)
+            mock_ui.document.getToc = function()
+                return {
+                    { title = "Title Page", page = 1, xpointer = "xp_title" },
+                    {
+                        title = "Part I: TROUBLE", page = 50, xpointer = "xp_part1",
+                        { title = "Some Kind of Coward", page = 10, xpointer = "xp_ch1" },
+                        { title = "The Heroes", page = 30, xpointer = "xp_ch2" }
+                    }
+                }
+            end
+
+            mock_ui.rolling = { current_page = 44 }
+            mock_ui.view = { state = { page = 44 } }
+
+            local samples, titles = analyzer:getDetailedChapterSamples(mock_ui, 100, 60000, false)
+
+            -- Should process Some Kind of Coward (10), The Heroes (30)
+            -- Title Page is non-narrative; Part I (50 > 44) should not break the loop early
+            assert.are.equal(2, #titles)
+            assert.are.equal("Some Kind of Coward", titles[1])
+            assert.are.equal("The Heroes", titles[2])
+        end)
     end)
 end)
+

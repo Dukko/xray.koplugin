@@ -422,12 +422,17 @@ function XRayPlugin:onPageUpdate(pageno)
             if not self.timeline or #self.timeline == 0 then
                 self:log("XRayPlugin: Cache is empty. Triggering immediate initial fetch in Ultra mode.")
                 local chapter_title = nil
-                local toc = self.ui.document:getToc()
+                local utils = require(plugin_path .. "xray_utils")
+                local toc = utils:flattenTOC(self.ui.document:getToc())
                 if toc and #toc > 0 then
+                    local max_p = -1
                     for _, entry in ipairs(toc) do
-                        if entry.page and entry.page <= pageno then
-                            chapter_title = entry.title
-                            break
+                        if entry.page then
+                            local p = tonumber(entry.page)
+                            if p and p <= pageno and p >= max_p then
+                                max_p = p
+                                chapter_title = entry.title
+                            end
                         end
                     end
                 end
@@ -462,13 +467,17 @@ function XRayPlugin:onPageUpdate(pageno)
 
         -- Resolve current chapter title from TOC if available
         local chapter_title = nil
-        local toc = self.ui.document:getToc()
+        local utils = require(plugin_path .. "xray_utils")
+        local toc = utils:flattenTOC(self.ui.document:getToc())
         if toc and #toc > 0 then
+            local max_p = -1
             for _, entry in ipairs(toc) do
-                if entry.page and entry.page <= pageno then
-                    chapter_title = entry.title
-                else
-                    break
+                if entry.page then
+                    local p = tonumber(entry.page)
+                    if p and p <= pageno and p >= max_p then
+                        max_p = p
+                        chapter_title = entry.title
+                    end
                 end
             end
         end
@@ -484,19 +493,23 @@ function XRayPlugin:onPageUpdate(pageno)
 
     -- 2. Standard chapter-based mode checks (requires TOC)
     -- Resolve current chapter title from TOC
-    local toc = self.ui.document:getToc()
+    local utils = require(plugin_path .. "xray_utils")
+    local toc = utils:flattenTOC(self.ui.document:getToc())
     if not toc or #toc == 0 then
         return
     end
 
     local chapter_title = nil
     local chapter_page = nil
+    local max_p = -1
     for _, entry in ipairs(toc) do
-        if entry.page and entry.page <= pageno then
-            chapter_title = entry.title
-            chapter_page = entry.page
-        else
-            break
+        if entry.page then
+            local p = tonumber(entry.page)
+            if p and p <= pageno and p >= max_p then
+                max_p = p
+                chapter_title = entry.title
+                chapter_page = entry.page
+            end
         end
     end
 
@@ -721,7 +734,8 @@ function XRayPlugin:autoLoadCache()
                     end)
                 end
                 self:log("XRayPlugin: Stage 3 - Repairing pages and deduplicating")
-                local toc = self.ui.document:getToc()
+                local utils = require(plugin_path .. "xray_utils")
+                local toc = utils:flattenTOC(self.ui.document:getToc())
                 self:assignTimelinePages(self.timeline, toc, false)
                 self:sortTimelineByTOC(self.timeline)
 

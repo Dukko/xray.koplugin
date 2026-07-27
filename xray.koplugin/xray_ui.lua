@@ -3237,7 +3237,8 @@ end
 
 function M:showTimeline()
     if not self.timeline or #self.timeline == 0 then UIManager:show(InfoMessage:new{ text = self.loc:t("no_timeline_data"), timeout = 3 }); return end
-    local toc = self.ui.document:getToc()
+    local utils = require(plugin_path .. "xray_utils")
+    local toc = utils:flattenTOC(self.ui.document:getToc())
     self:assignTimelinePages(self.timeline, toc, true)
     self:sortTimelineByTOC(self.timeline)
     

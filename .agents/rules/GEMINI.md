@@ -8,7 +8,6 @@ trigger: always_on
 
 - When generating new LUA code, please follow the existing coding style.
 - Any changes should not break existing functionality: do proper regression testing every time.
-- Use the similar assistant.koreader plugin as an example for efficient calls to the gemini api
 - Don't change the menu or core functionality unless instructed to.
 - **Environment:** The developer is running on **Windows** using **PowerShell**. All commands and scripts must be compatible with this environment.
 

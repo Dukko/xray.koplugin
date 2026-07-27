@@ -117,5 +117,26 @@ function M:getTruncatedText(text, limit_en, threshold_en)
     end
 end
 
+-- Recursively flattens KOReader's nested TOC tree structure into a flat array
+function M:flattenTOC(nodes, flat_list)
+    flat_list = flat_list or {}
+    if not nodes then return flat_list end
+    
+    for _, node in ipairs(nodes) do
+        table.insert(flat_list, node)
+        if type(node) == "table" then
+            if #node > 0 then
+                M:flattenTOC(node, flat_list)
+            elseif node.sub_item_table then
+                M:flattenTOC(node.sub_item_table, flat_list)
+            elseif node.children then
+                M:flattenTOC(node.children, flat_list)
+            end
+        end
+    end
+    return flat_list
+end
+
 return M
+
 

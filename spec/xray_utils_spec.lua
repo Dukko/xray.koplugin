@@ -105,4 +105,28 @@ describe("xray_utils", function()
             assert.are.equal("error_unknown_desc:Crazy error", desc)
         end)
     end)
+
+    describe("flattenTOC", function()
+        it("flattens a nested TOC structure with array children", function()
+            local nested_toc = {
+                { title = "Title Page", page = 1 },
+                {
+                    title = "Part I", page = 2,
+                    { title = "Chapter 1", page = 3 },
+                    { title = "Chapter 2", page = 10, { title = "Section 2.1", page = 12 } }
+                },
+                { title = "Part II", page = 20 }
+            }
+
+            local flat = utils:flattenTOC(nested_toc)
+            assert.are.equal(6, #flat)
+            assert.are.equal("Title Page", flat[1].title)
+            assert.are.equal("Part I", flat[2].title)
+            assert.are.equal("Chapter 1", flat[3].title)
+            assert.are.equal("Chapter 2", flat[4].title)
+            assert.are.equal("Section 2.1", flat[5].title)
+            assert.are.equal("Part II", flat[6].title)
+        end)
+    end)
 end)
+

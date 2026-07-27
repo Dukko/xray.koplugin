@@ -185,10 +185,8 @@ function M:showMentionsForEntity(entity)
         self.active_mention_scan.cancel_handle:cancel()
         self.active_mention_scan = nil
     end
-    if not self.ui or not self.ui.document then return end
-    if not self.chapter_analyzer then self.chapter_analyzer = require(plugin_path .. "xray_chapteranalyzer"):new() end
-    
-    local toc = self.ui.document:getToc() or {}
+    local utils = require(plugin_path .. "xray_utils")
+    local toc = utils:flattenTOC(self.ui.document:getToc())
     local spoiler_free = (self.ai_helper and self.ai_helper.settings and self.ai_helper.settings.spoiler_setting or "spoiler_free") == "spoiler_free"
     local max_page = spoiler_free and _getCurrentPage(self) or nil
     

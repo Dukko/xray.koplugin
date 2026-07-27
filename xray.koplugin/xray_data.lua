@@ -259,8 +259,24 @@ function M:isNonNarrativeChapter(title)
     return false
 end
 
-function M:assignTimelinePages(timeline, toc, allow_findtext)
-    if not toc or not timeline or #timeline == 0 then return end
+function M:assignTimelinePages(timeline, raw_toc, allow_findtext)
+    if not raw_toc or not timeline or #timeline == 0 then return end
+
+    local toc = {}
+    local function flatten(nodes)
+        if not nodes then return end
+        for _, node in ipairs(nodes) do
+            table.insert(toc, node)
+            if type(node) == "table" then
+                if #node > 0 then flatten(node)
+                elseif node.sub_item_table then flatten(node.sub_item_table)
+                elseif node.children then flatten(node.children)
+                end
+            end
+        end
+    end
+    flatten(raw_toc)
+    if #toc == 0 then return end
 
     -- Build ORDERED QUEUES (not single-value maps) for each match strategy.
     -- key → list of pages in TOC order, so the Nth event with that key gets the Nth page.

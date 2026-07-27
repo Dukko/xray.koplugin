@@ -240,13 +240,16 @@ function M:_processSingleWordResult(result, text, book_text, current_page)
             -- Resolve current chapter title for history tracking
             local chapter_title = nil
             if self.ui and self.ui.document and current_page then
-                local toc = self.ui.document:getToc()
+                local toc = utils:flattenTOC(self.ui.document:getToc())
                 if toc then
+                    local max_p = -1
                     for _, entry in ipairs(toc) do
-                        if entry.page and entry.page <= current_page then
-                            chapter_title = entry.title
-                        else
-                            break
+                        if entry.page then
+                            local p = tonumber(entry.page)
+                            if p and p <= current_page and p >= max_p then
+                                max_p = p
+                                chapter_title = entry.title
+                            end
                         end
                     end
                 end
@@ -381,7 +384,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
         local current_page = self.ui:getCurrentPage()
         local first_missing_page = last_fetch_page
         if is_update then
-            local toc = self.ui.document:getToc() or {}
+            local toc = utils:flattenTOC(self.ui.document:getToc())
             local candidate_chapters = {}
             for i = #toc, 1, -1 do
                 local entry = toc[i]
@@ -595,13 +598,16 @@ function M:finalizeXRayData(final_book_data, title, author, book_text, is_update
     -- Resolve current chapter title for history tracking
     local chapter_title = nil
     if self.ui and self.ui.document and current_page then
-        local toc = self.ui.document:getToc()
+        local toc = utils:flattenTOC(self.ui.document:getToc())
         if toc then
+            local max_p = -1
             for _, entry in ipairs(toc) do
-                if entry.page and entry.page <= current_page then
-                    chapter_title = entry.title
-                else
-                    break
+                if entry.page then
+                    local p = tonumber(entry.page)
+                    if p and p <= current_page and p >= max_p then
+                        max_p = p
+                        chapter_title = entry.title
+                    end
                 end
             end
         end
@@ -780,27 +786,43 @@ function M:finalizeXRayData(final_book_data, title, author, book_text, is_update
         if final_book_data.book_type then
             self.book_type = final_book_data.book_type
         end
-        -- Merge timeline: duplicate = same chapter name AND same page.
-        local toc = self.ui.document:getToc()
-        -- Assign TOC pages to incoming events before dedup check.
-        self:assignTimelinePages(final_book_data.timeline or {}, toc, true)
-        for _, new_event in ipairs(final_book_data.timeline or {}) do
+
+        -- Segregate series_prior timeline items from current book timeline items
+        local prior_timeline = {}
+        local current_timeline = {}
+        for _, ev in ipairs(self.timeline or {}) do
+            if ev.source == "series_prior" then
+                table.insert(prior_timeline, ev)
+            else
+                table.insert(current_timeline, ev)
+            end
+        end
+
+        local toc = self.ui and self.ui.document and self.ui.document.getToc and self.ui.document:getToc() or {}
+        local incoming_timeline = final_book_data.timeline or {}
+        self:assignTimelinePages(incoming_timeline, toc, true)
+
+        for _, new_event in ipairs(incoming_timeline) do
             local found = false
             local new_norm = self:normalizeChapterName(new_event.chapter or "")
-            for _, existing_event in ipairs(self.timeline or {}) do
+            for _, existing_event in ipairs(current_timeline) do
                 local exist_norm = self:normalizeChapterName(existing_event.chapter or "")
                 if new_norm == exist_norm then
-                    -- Both pages must be present and equal to count as a duplicate
                     if new_event.page and existing_event.page and
                        tonumber(new_event.page) == tonumber(existing_event.page) then
+                        existing_event.event = new_event.event or existing_event.event
+                        existing_event.chapter = new_event.chapter or existing_event.chapter
                         found = true
                         break
                     end
                 end
             end
-            if not found then table.insert(self.timeline, new_event) end
+            if not found then table.insert(current_timeline, new_event) end
         end
-        -- Sort the merged timeline chronologically
+
+        self.timeline = {}
+        for _, ev in ipairs(current_timeline) do table.insert(self.timeline, ev) end
+        for _, ev in ipairs(prior_timeline) do table.insert(self.timeline, ev) end
         self:sortTimelineByTOC(self.timeline)
     else
         self.characters = final_book_data.characters
@@ -841,10 +863,22 @@ function M:finalizeXRayData(final_book_data, title, author, book_text, is_update
         end
         self.terms = final_book_data.terms or {}
         self.book_type = final_book_data.book_type
-        self.timeline = final_book_data.timeline
-        -- Assign TOC pages and sort
-        local toc = self.ui.document:getToc()
-        self:assignTimelinePages(self.timeline or {}, toc, true)
+
+        -- Preserve series_prior items when non-merge update/fetch overwrites current timeline
+        local prior_timeline = {}
+        for _, ev in ipairs(self.timeline or {}) do
+            if ev.source == "series_prior" then
+                table.insert(prior_timeline, ev)
+            end
+        end
+
+        local current_timeline = final_book_data.timeline or {}
+        local toc = self.ui and self.ui.document and self.ui.document.getToc and self.ui.document:getToc() or {}
+        self:assignTimelinePages(current_timeline, toc, true)
+
+        self.timeline = {}
+        for _, ev in ipairs(current_timeline) do table.insert(self.timeline, ev) end
+        for _, ev in ipairs(prior_timeline) do table.insert(self.timeline, ev) end
         self:sortTimelineByTOC(self.timeline)
     end
 
@@ -879,6 +913,39 @@ function M:finalizeXRayData(final_book_data, title, author, book_text, is_update
 
     if not self.cache_manager then self.cache_manager = require(plugin_path .. "xray_cachemanager"):new() end
     local cache_saved = self.cache_manager:asyncSaveCache(self.ui.document.file, updated_data)
+
+    -- If book is part of a series, update this book's entry in SeriesCache
+    if self.series_manager and (updated_data.series_slug or (self.ui and self.ui.document)) then
+        pcall(function()
+            local props = self.ui and self.ui.document and self.ui.document:getProps() or {}
+            local series_info = self.series_manager:detectSeries(props, title, author, nil)
+            local slug = updated_data.series_slug or (series_info and series_info.slug)
+            local index = series_info and series_info.index
+            if slug and index then
+                local cache_data = self.series_manager:loadSeriesCache(slug)
+                if cache_data and cache_data.books then
+                    local function filterCurrentOnly(tbl)
+                        local res = {}
+                        for _, item in ipairs(tbl or {}) do
+                            if item.source ~= "series_prior" then
+                                table.insert(res, item)
+                            end
+                        end
+                        return res
+                    end
+                    cache_data.books[index] = {
+                        title = title,
+                        author = author,
+                        characters = filterCurrentOnly(self.characters),
+                        locations = filterCurrentOnly(self.locations),
+                        terms = filterCurrentOnly(self.terms),
+                        timeline = filterCurrentOnly(self.timeline),
+                    }
+                    self.series_manager:saveSeriesCache(slug, cache_data)
+                end
+            end
+        end)
+    end
 
     UIManager:scheduleIn(1, function()
         if self.destroyed then return end
@@ -1448,10 +1515,15 @@ end
 function M:mergeSeriesContext(cache_data, series_info)
     if not cache_data or not series_info then return end
 
+    self.characters = self.characters or {}
+    self.locations = self.locations or {}
+    self.terms = self.terms or {}
+    self.timeline = self.timeline or {}
+
     local function filterPrior(tbl)
         local filtered = {}
         for _, item in ipairs(tbl or {}) do
-            if item.source ~= "series_prior" then
+            if item and item.source ~= "series_prior" then
                 table.insert(filtered, item)
             end
         end
@@ -1463,97 +1535,112 @@ function M:mergeSeriesContext(cache_data, series_info)
     self.terms = filterPrior(self.terms)
     self.timeline = filterPrior(self.timeline)
 
-    for idx = 1, series_info.index - 1 do
+    for idx = 1, (series_info.index or 1) - 1 do
         local book_data = cache_data.books and cache_data.books[idx]
         if book_data then
             for _, new_char in ipairs(book_data.characters or {}) do
-                local found = false
-                local lower_name = new_char.name:lower()
-                for _, existing_char in ipairs(self.characters) do
-                    local matches = false
-                    if existing_char.name:lower() == lower_name then
-                        matches = true
-                    else
-                        for _, alias in ipairs(existing_char.aliases or {}) do
-                            if alias:lower() == lower_name then
+                if new_char and new_char.name and new_char.name ~= "" then
+                    local found = false
+                    local lower_name = new_char.name:lower()
+                    for _, existing_char in ipairs(self.characters) do
+                        if existing_char and existing_char.name then
+                            local matches = false
+                            if existing_char.name:lower() == lower_name then
                                 matches = true
+                            else
+                                for _, alias in ipairs(existing_char.aliases or {}) do
+                                    if type(alias) == "string" and alias:lower() == lower_name then
+                                        matches = true
+                                        break
+                                    end
+                                end
+                            end
+                            
+                            if matches then
+                                found = true
+                                local prefix = string.format("[From Book %d] ", idx)
+                                if new_char.description and new_char.description ~= "" then
+                                    local exist_desc = existing_char.description or ""
+                                    if not exist_desc:find(prefix, 1, true) then
+                                        existing_char.description = prefix .. new_char.description .. "\n\n" .. exist_desc
+                                    end
+                                end
                                 break
                             end
                         end
                     end
                     
-                    if matches then
-                        found = true
-                        local prefix = string.format("[From Book %d] ", idx)
-                        if new_char.description and new_char.description ~= "" then
-                            if not existing_char.description:find(prefix, 1, true) then
-                                existing_char.description = prefix .. new_char.description .. "\n\n" .. existing_char.description
-                            end
-                        end
-                        break
+                    if not found then
+                        local char_copy = {}
+                        for k, v in pairs(new_char) do char_copy[k] = v end
+                        char_copy.source = "series_prior"
+                        char_copy.source_book = idx
+                        table.insert(self.characters, char_copy)
                     end
-                end
-                
-                if not found then
-                    local char_copy = {}
-                    for k, v in pairs(new_char) do char_copy[k] = v end
-                    char_copy.source = "series_prior"
-                    char_copy.source_book = idx
-                    table.insert(self.characters, char_copy)
                 end
             end
 
             for _, new_loc in ipairs(book_data.locations or {}) do
-                local found = false
-                local lower_name = new_loc.name:lower()
-                for _, existing_loc in ipairs(self.locations) do
-                    if existing_loc.name:lower() == lower_name then
-                        found = true
-                        local prefix = string.format("[From Book %d] ", idx)
-                        if new_loc.description and new_loc.description ~= "" then
-                            if not existing_loc.description:find(prefix, 1, true) then
-                                existing_loc.description = prefix .. new_loc.description .. "\n\n" .. existing_loc.description
+                if new_loc and new_loc.name and new_loc.name ~= "" then
+                    local found = false
+                    local lower_name = new_loc.name:lower()
+                    for _, existing_loc in ipairs(self.locations) do
+                        if existing_loc and existing_loc.name then
+                            if existing_loc.name:lower() == lower_name then
+                                found = true
+                                local prefix = string.format("[From Book %d] ", idx)
+                                if new_loc.description and new_loc.description ~= "" then
+                                    local exist_desc = existing_loc.description or ""
+                                    if not exist_desc:find(prefix, 1, true) then
+                                        existing_loc.description = prefix .. new_loc.description .. "\n\n" .. exist_desc
+                                    end
+                                end
+                                break
                             end
                         end
-                        break
                     end
-                end
-                if not found then
-                    local loc_copy = {}
-                    for k, v in pairs(new_loc) do loc_copy[k] = v end
-                    loc_copy.source = "series_prior"
-                    loc_copy.source_book = idx
-                    table.insert(self.locations, loc_copy)
+                    if not found then
+                        local loc_copy = {}
+                        for k, v in pairs(new_loc) do loc_copy[k] = v end
+                        loc_copy.source = "series_prior"
+                        loc_copy.source_book = idx
+                        table.insert(self.locations, loc_copy)
+                    end
                 end
             end
 
             for _, new_term in ipairs(book_data.terms or {}) do
-                local found = false
-                local lower_name = new_term.name:lower()
-                for _, existing_term in ipairs(self.terms) do
-                    if existing_term.name:lower() == lower_name then
-                        found = true
-                        local prefix = string.format("[From Book %d] ", idx)
-                        if new_term.definition and new_term.definition ~= "" then
-                            if not existing_term.definition:find(prefix, 1, true) then
-                                existing_term.definition = prefix .. new_term.definition .. "\n\n" .. existing_term.definition
+                if new_term and new_term.name and new_term.name ~= "" then
+                    local found = false
+                    local lower_name = new_term.name:lower()
+                    for _, existing_term in ipairs(self.terms) do
+                        if existing_term and existing_term.name then
+                            if existing_term.name:lower() == lower_name then
+                                found = true
+                                local prefix = string.format("[From Book %d] ", idx)
+                                if new_term.definition and new_term.definition ~= "" then
+                                    local exist_def = existing_term.definition or ""
+                                    if not exist_def:find(prefix, 1, true) then
+                                        existing_term.definition = prefix .. new_term.definition .. "\n\n" .. exist_def
+                                    end
+                                end
+                                break
                             end
                         end
-                        break
                     end
-                end
-                if not found then
-                    local term_copy = {}
-                    for k, v in pairs(new_term) do term_copy[k] = v end
-                    term_copy.source = "series_prior"
-                    term_copy.source_book = idx
-                    table.insert(self.terms, term_copy)
+                    if not found then
+                        local term_copy = {}
+                        for k, v in pairs(new_term) do term_copy[k] = v end
+                        term_copy.source = "series_prior"
+                        term_copy.source_book = idx
+                        table.insert(self.terms, term_copy)
+                    end
                 end
             end
 
             local events = {}
             for _, new_event in ipairs(book_data.timeline or {}) do
-                if new_event.event and new_event.event ~= "" then
+                if new_event and new_event.event and new_event.event ~= "" then
                     table.insert(events, new_event.event)
                 end
             end
@@ -1578,7 +1665,7 @@ function M:mergeSeriesContext(cache_data, series_info)
         end
     end
 
-    local toc = self.ui.document:getToc() or {}
+    local toc = self.ui and self.ui.document and self.ui.document.getToc and utils:flattenTOC(self.ui.document:getToc()) or {}
     self:assignTimelinePages(self.timeline, toc, true)
     self:sortTimelineByTOC(self.timeline)
 
@@ -1586,19 +1673,21 @@ function M:mergeSeriesContext(cache_data, series_info)
     if not self.cache_manager then
         self.cache_manager = require(plugin_path .. "xray_cachemanager"):new()
     end
-    local book_path = self.ui.document.file
-    if not self.book_data then
-        self.book_data = self.cache_manager:loadCache(book_path) or {}
+    local book_path = self.ui and self.ui.document and self.ui.document.file
+    if book_path then
+        if not self.book_data then
+            self.book_data = self.cache_manager:loadCache(book_path) or {}
+        end
+        local cache = self.book_data
+        cache.series_context_loaded = true
+        cache.series_slug = series_info.slug
+        cache.characters = self.characters
+        cache.locations = self.locations
+        cache.terms = self.terms
+        cache.timeline = self.timeline
+        self.cache_manager:asyncSaveCache(book_path, cache)
+        self.book_data = cache
     end
-    local cache = self.book_data
-    cache.series_context_loaded = true
-    cache.series_slug = series_info.slug
-    cache.characters = self.characters
-    cache.locations = self.locations
-    cache.terms = self.terms
-    cache.timeline = self.timeline
-    self.cache_manager:asyncSaveCache(book_path, cache)
-    self.book_data = cache
 end
 
 function M:fetchSeriesContext(is_silent, init_wait_dialog, cancel_ref)
