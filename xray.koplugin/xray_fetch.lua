@@ -1004,6 +1004,14 @@ function M:runPostFetchDuplicateCheck(title, author, reading_percent, is_silent)
     local DataStorage = require("datastorage")
     local settings_xray_dir = DataStorage:getSettingsDir() .. "/xray"
 
+    -- Gather a small book text anchor for the spoiler guard.
+    -- This is done once here and shared across both list checks.
+    if not self.chapter_analyzer then
+        self.chapter_analyzer = require(plugin_path .. "xray_chapteranalyzer"):new()
+    end
+    local dup_book_text = self.chapter_analyzer:getTextForAnalysis(
+        self.ui, 15000, nil, self.ui:getCurrentPage())
+
     -- Run checks for characters and locations in sequence using async subprocesses
     local function checkListAsync(list, list_name, entity_label, on_done)
         if not list or #list < 2 then on_done(nil); return end
@@ -1012,7 +1020,7 @@ function M:runPostFetchDuplicateCheck(title, author, reading_percent, is_silent)
         local result_file = settings_xray_dir .. "/dupe_res_" .. list_name .. "_" .. unique_id .. ".json"
         
         self:log("XRayPlugin: Starting async duplicate check for " .. list_name)
-        local pid = self.ai_helper:findDuplicatesAsync(title, author, list, entity_label, reading_percent, result_file)
+        local pid = self.ai_helper:findDuplicatesAsync(title, author, list, entity_label, reading_percent, result_file, dup_book_text)
         if not pid then
             self:log("XRayPlugin: Failed to start async duplicate check for " .. list_name)
             on_done(nil)

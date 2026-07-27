@@ -2232,7 +2232,7 @@ function AIHelper:setUnifiedModel(type, provider, model)
     return true
 end
 
-function AIHelper:findDuplicates(title, author, entities, entity_type_label, reading_percent)
+function AIHelper:findDuplicates(title, author, entities, entity_type_label, reading_percent, book_text)
     if not self.prompts then self:loadLanguage() end
     local template = self.prompts.find_duplicates
     if not template then return nil, "no_prompt", "find_duplicates prompt missing" end
@@ -2261,6 +2261,10 @@ function AIHelper:findDuplicates(title, author, entities, entity_type_label, rea
     )
     prompt = self:sanitize_utf8(prompt)
 
+    if book_text and #book_text > 0 then
+        prompt = prompt .. "\n\nBOOK TEXT (READ SO FAR — use this to judge what the reader knows):\n" .. book_text
+    end
+
     local result, err_code, err_msg = self:executeUnifiedRequest(prompt)
     if result and type(result.duplicate_pairs) == "table" then
         return result.duplicate_pairs
@@ -2268,7 +2272,7 @@ function AIHelper:findDuplicates(title, author, entities, entity_type_label, rea
     return nil, err_code or "error_parse", err_msg or "No duplicate_pairs in response"
 end
 
-function AIHelper:findDuplicatesAsync(title, author, entities, entity_type_label, reading_percent, result_file)
+function AIHelper:findDuplicatesAsync(title, author, entities, entity_type_label, reading_percent, result_file, book_text)
     if not self.prompts then self:loadLanguage() end
     local template = self.prompts.find_duplicates
     if not template then return nil, "no_prompt", "find_duplicates prompt missing" end
@@ -2294,6 +2298,10 @@ function AIHelper:findDuplicatesAsync(title, author, entities, entity_type_label
         table.concat(lines, "\n"), p
     )
     prompt = self:sanitize_utf8(prompt)
+
+    if book_text and #book_text > 0 then
+        prompt = prompt .. "\n\nBOOK TEXT (READ SO FAR — use this to judge what the reader knows):\n" .. book_text
+    end
 
     local requests, error_code, error_msg = self:buildComprehensiveRequest(nil, nil, nil, prompt)
     if not requests then return nil, error_code or "error_build", error_msg or "Failed to build request" end

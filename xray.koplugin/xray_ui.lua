@@ -2234,6 +2234,12 @@ function M:showAIFindDuplicatesFlow(list, list_name, entity_label)
     local spoiler_setting = self.ai_helper.settings and self.ai_helper.settings.spoiler_setting or "spoiler_free"
     if spoiler_setting == "full_book" then reading_percent = 100 end
 
+    if not self.chapter_analyzer then
+        self.chapter_analyzer = require(plugin_path .. "xray_chapteranalyzer"):new()
+    end
+    local dup_book_text = self.chapter_analyzer:getTextForAnalysis(
+        self.ui, 15000, nil, current_page)
+
     local wait_msg = InfoMessage:new{
         text = self.loc:t("ai_scanning_duplicates") or "AI is scanning for duplicates...",
         timeout = 120
@@ -2243,7 +2249,7 @@ function M:showAIFindDuplicatesFlow(list, list_name, entity_label)
     UIManager:scheduleIn(0.1, function()
         if self.destroyed then return end
         local pairs_found, err_code, err_msg = self.ai_helper:findDuplicates(
-            title, author, list, entity_label, reading_percent
+            title, author, list, entity_label, reading_percent, dup_book_text
         )
         UIManager:close(wait_msg)
 

@@ -429,6 +429,9 @@ function ChapterAnalyzer:getTextFromPageRange(ui, start_page, end_page, max_len)
         return nil
     else
         -- PDF: page-by-page extraction
+        if not ui.document.getPageText then
+            return nil
+        end
         local text = ""
         for page = start_page, end_page do
             local page_text = ui.document:getPageText(page) or ""
@@ -579,6 +582,10 @@ function ChapterAnalyzer:getTextForAnalysis(ui, max_len, progress_callback, curr
         end
     else
         -- For page-based documents (PDF), get text from a limited number of pages before current
+        if not ui.document.getPageText then
+            logger.warn("ChapterAnalyzer: getPageText not supported on ui.document")
+            return ""
+        end
         local current_pos = current_page or (ui.view and ui.view.state and ui.view.state.page) or 1
         local max_pages = 100 
         local calc_start_page = math.max(1, current_pos - max_pages)
