@@ -253,6 +253,62 @@ describe("AIHelper", function()
                 assert.are.equal("HTTP 400: custom1 is not a valid model ID", err_msg)
             end)
         end)
+
+    end)
+
+    describe("async child cancellation", function()
+        it("terminates, reaps, and cleans only the expected child", function()
+            local old_ffiutil = package.loaded["ffi/util"]
+            local old_kill = AIHelper._killAsyncPID
+            local calls = {}
+            package.loaded["ffi/util"] = {
+                terminateSubProcess = function(pid)
+                    table.insert(calls, { action = "terminate", pid = pid })
+                end,
+                isSubProcessDone = function(pid, wait)
+                    table.insert(calls, { action = "reap", pid = pid, wait = wait })
+                    return true
+                end,
+            }
+            AIHelper._killAsyncPID = function(self, pid, wait)
+                table.insert(calls, { action = "kill", pid = pid, wait = wait })
+                return true
+            end
+
+            local result_file = os.tmpname()
+            local file = io.open(result_file, "w")
+            file:write("pending")
+            file:close()
+
+            AIHelper._async_child_pid = 4321
+            AIHelper._async_child_uses_process_group = true
+            AIHelper._async_result_file = result_file
+
+            local ok, err = pcall(function()
+                assert.is_false(AIHelper:cancelAsyncChild(9999))
+                assert.are.equal(4321, AIHelper._async_child_pid)
+                assert.are.equal(0, #calls)
+
+                assert.is_true(AIHelper:cancelAsyncChild(4321))
+                assert.are.equal("kill", calls[1].action)
+                assert.are.equal(4321, calls[1].pid)
+                assert.is_false(calls[1].wait)
+                assert.are.equal("terminate", calls[2].action)
+                assert.are.equal("reap", calls[3].action)
+                assert.is_true(calls[3].wait)
+                assert.is_nil(AIHelper._async_child_pid)
+                assert.is_nil(AIHelper._async_result_file)
+                assert.is_nil(io.open(result_file, "r"))
+            end)
+
+            package.loaded["ffi/util"] = old_ffiutil
+            AIHelper._killAsyncPID = old_kill
+            AIHelper._async_child_pid = nil
+            AIHelper._async_child_uses_process_group = nil
+            AIHelper._async_result_file = nil
+            pcall(function() os.remove(result_file) end)
+            if not ok then error(err) end
+        end)
     end)
 
     describe("isAnthropic", function()

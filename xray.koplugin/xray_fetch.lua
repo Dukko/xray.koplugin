@@ -323,7 +323,18 @@ function M:_processSingleWordResult(result, text, book_text, current_page)
 end
 
 function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_silent)
+    self._fetch_generation = (self._fetch_generation or 0) + 1
+    local fetch_generation = self._fetch_generation
+    self._active_fetch_generation = fetch_generation
     self.bg_fetch_active = true
+
+    local function clearFetchState()
+        if self._active_fetch_generation == fetch_generation then
+            self._active_fetch_generation = nil
+            self.bg_fetch_active = false
+        end
+    end
+
     if not self.ai_helper then
         local AIHelper = require(plugin_path .. "xray_aihelper")
         self.ai_helper = AIHelper
@@ -356,6 +367,25 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
     -- (which requires an InfoMessage widget and breaks with ButtonDialog).
     local wait_msg
     local is_cancelled = false
+    local result_file
+    local request_pid
+
+    local function finishActiveRequest()
+        request_pid = nil
+        result_file = nil
+        clearFetchState()
+    end
+
+    local function cancelActiveRequest(reason)
+        if request_pid and self.ai_helper and self.ai_helper.cancelAsyncChild then
+            self.ai_helper:cancelAsyncChild(request_pid)
+        end
+        if result_file then
+            pcall(function() os.remove(result_file) end)
+        end
+        finishActiveRequest()
+        self:log("XRayPlugin: " .. reason)
+    end
 
     if not is_silent then
         local ButtonDialog = require("ui/widget/buttondialog")
@@ -369,8 +399,8 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
                 text = self.loc:t("cancel") or "Cancel",
                 callback = function()
                     is_cancelled = true
-                    self:log("XRayPlugin: Fetch cancelled by user (button pressed)")
                     if wait_msg then UIManager:close(wait_msg) end
+                    cancelActiveRequest("Fetch cancelled by user")
                 end
             }}}
         }
@@ -378,7 +408,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
     end
 
     UIManager:scheduleIn(0.5, function()
-        if is_cancelled or self.destroyed then self.bg_fetch_active = false; return end
+        if is_cancelled or self.destroyed then clearFetchState(); return end
         if not self.chapter_analyzer then self.chapter_analyzer = require(plugin_path .. "xray_chapteranalyzer"):new() end
 
         local current_page = self.ui:getCurrentPage()
@@ -426,8 +456,8 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
         end
 
         UIManager:scheduleIn(0, function()
-            if is_cancelled or self.destroyed then self.bg_fetch_active = false; return end
-            if not self.ui or not self.ui.document then self.bg_fetch_active = false; return end
+            if is_cancelled or self.destroyed then clearFetchState(); return end
+            if not self.ui or not self.ui.document then clearFetchState(); return end
 
             local samples, chapter_titles = self.chapter_analyzer:getDetailedChapterSamples(self.ui, 200, 150000, reading_percent == 100, first_missing_page, known_chapters)
             local annots = self.chapter_analyzer:getAnnotationsForAnalysis(self.ui)
@@ -436,7 +466,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
                 if wait_msg then UIManager:close(wait_msg) end
                 if not is_silent then UIManager:show(InfoMessage:new{ text = self.loc:t("error_extract_text") or "Error: Could not extract book text.", timeout = 5 }) end
                 self:log("XRayPlugin: Text extraction failed" .. (is_silent and " (silent)" or ""))
-                self.bg_fetch_active = false
+                clearFetchState()
                 return
             end
 
@@ -459,7 +489,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
             if not req_params then
                 if wait_msg then UIManager:close(wait_msg) end
                 self:log("XRayPlugin: Failed to build request: " .. tostring(err_msg))
-                self.bg_fetch_active = false
+                clearFetchState()
                 if not is_silent then
                     local title, text = utils:getFriendlyError(err_code, err_msg, self.loc)
                     UIManager:show(ConfirmBox:new{
@@ -489,38 +519,37 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
                 end
             end)
 
-            local result_file = settings_xray_dir .. "/bg_fetch_" .. tostring(os.time()) .. ".json"
+            result_file = settings_xray_dir .. "/bg_fetch_" .. tostring(os.time()) .. "_" .. tostring(fetch_generation) .. ".json"
             local started = self.ai_helper:makeRequestAsync(req_params, result_file)
             if not started then
                 if wait_msg then UIManager:close(wait_msg) end
                 self:log("XRayPlugin: Failed to start async fetch")
-                self.bg_fetch_active = false
+                pcall(function() os.remove(result_file) end)
+                result_file = nil
+                clearFetchState()
                 return
             end
+            request_pid = started
 
             local poll_count = 0
             local max_polls = 300 -- 10 minutes at 2s intervals
             local function poll()
                 if is_cancelled or self.destroyed then
-                    pcall(function() os.remove(result_file) end)
-                    self.bg_fetch_active = false
-                    self:log("XRayPlugin: Fetch cancelled or plugin destroyed")
+                    cancelActiveRequest(self.destroyed and "Fetch stopped because plugin was destroyed" or "Fetch cancelled")
                     return
                 end
                 if not self.ui or not self.ui.document then
-                    pcall(function() os.remove(result_file) end)
-                    self.bg_fetch_active = false
+                    cancelActiveRequest("Fetch stopped because the document was closed")
                     return
                 end
                 poll_count = poll_count + 1
-                local data, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file)
+                local data, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file, request_pid)
                 if data == nil then
                     if poll_count < max_polls then
                         UIManager:scheduleIn(2, poll)
                     else
                         if wait_msg then UIManager:close(wait_msg) end
-                        self.bg_fetch_active = false
-                        self:log("XRayPlugin: Fetch timed out")
+                        cancelActiveRequest("Fetch timed out")
                         if not is_silent then
                             local title, text = utils:getFriendlyError("error_timeout", nil, self.loc)
                             UIManager:show(ConfirmBox:new{
@@ -532,7 +561,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
                     end
                 elseif data == false then
                     if wait_msg then UIManager:close(wait_msg) end
-                    self.bg_fetch_active = false
+                    finishActiveRequest()
                     self:log("XRayPlugin: Fetch failed: " .. tostring(p_err_msg))
                     if not is_silent then
                         local title, text = utils:getFriendlyError(p_err_code, p_err_msg, self.loc)
@@ -544,7 +573,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
                     end
                 else
                     if wait_msg then UIManager:close(wait_msg) end
-                    self.bg_fetch_active = false
+                    finishActiveRequest()
                     self:finalizeXRayData(data, title, author, book_text, is_update, is_silent, current_page)
                 end
             end

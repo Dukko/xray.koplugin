@@ -447,12 +447,75 @@ function AIHelper:hasApiKey()
     return false
 end
 
+local function getFFIUtil()
+    local ok, ffiutil = pcall(require, "ffi/util")
+    if not ok then
+        ok, ffiutil = pcall(require, "ffiutil")
+    end
+    return ok and ffiutil or nil
+end
+
+function AIHelper:_clearAsyncChildState(pid)
+    if self._async_child_pid == pid then
+        self._async_child_pid = nil
+        self._async_child_uses_process_group = nil
+        self._async_result_file = nil
+    end
+end
+
+-- Reap a completed child without touching a newer request that may have
+-- replaced it. When wait is true, this blocks until the child exits.
+function AIHelper:_reapAsyncChild(pid, wait)
+    if not pid or self._async_child_pid ~= pid then return false end
+
+    local ffiutil = getFFIUtil()
+    if ffiutil and ffiutil.isSubProcessDone then
+        local ok, done = pcall(ffiutil.isSubProcessDone, pid, wait == true)
+        if ok and done then
+            self:_clearAsyncChildState(pid)
+            return true
+        end
+    end
+
+    local ok, done = pcall(function()
+        local ffi = require("ffi")
+        ffi.cdef[[ int waitpid(int pid, int *status, int options); ]]
+        local result = ffi.C.waitpid(pid, nil, wait and 0 or 1)
+        return result == pid or result == -1
+    end)
+    if ok and done then
+        self:_clearAsyncChildState(pid)
+        return true
+    end
+    return false
+end
+
+function AIHelper:_killAsyncPID(pid, wait)
+    local ok, done = pcall(function()
+        local ffi = require("ffi")
+        ffi.cdef[[
+            int kill(int pid, int sig);
+            int waitpid(int pid, int *status, int options);
+        ]]
+        local kill_result = ffi.C.kill(pid, 9) -- SIGKILL
+        if not wait then
+            return kill_result == 0 or kill_result == -1
+        end
+        local wait_result = ffi.C.waitpid(pid, nil, 0)
+        return kill_result == 0 or wait_result == pid or wait_result == -1
+    end)
+    return ok and done == true
+end
+
 -- Fork a child process to perform the HTTP request. Returns true if started.
 function AIHelper:makeRequestAsync(request_params, result_file)
-    local ok_ffi, ffiutil = pcall(require, "ffi/util")
-    if not ok_ffi then
-        ok_ffi, ffiutil = pcall(require, "ffiutil")
+    if self._async_child_pid and not self:_reapAsyncChild(self._async_child_pid, false) then
+        self:log("AIHelper: Cannot start async request while PID " .. tostring(self._async_child_pid) .. " is still active")
+        return false
     end
+
+    local ffiutil = getFFIUtil()
+    local ok_ffi = ffiutil ~= nil
     
     local function child_logic(pid, write_fd)
         local child_ok, child_err = pcall(function()
@@ -725,6 +788,8 @@ function AIHelper:makeRequestAsync(request_params, result_file)
                 end)
             end
             self._async_child_pid = pid
+            self._async_child_uses_process_group = true
+            self._async_result_file = result_file
             return pid
         end
     end
@@ -757,6 +822,8 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         elseif pid and pid > 0 then
             self:log("AIHelper: Manual fork started PID " .. tostring(pid))
             self._async_child_pid = pid
+            self._async_child_uses_process_group = false
+            self._async_result_file = result_file
             return pid
         end
     end
@@ -769,7 +836,7 @@ end
 --   nil (still pending)
 --   book_data table (success)
 --   false, error_code, error_msg (failed)
-function AIHelper:checkAsyncResult(result_file)
+function AIHelper:checkAsyncResult(result_file, expected_pid)
     local f = io.open(result_file, "r")
     if not f then return nil end  -- still pending
 
@@ -777,13 +844,12 @@ function AIHelper:checkAsyncResult(result_file)
     f:close()
     os.remove(result_file)
 
-    -- Reap child process to prevent zombies
-    if self._async_child_pid then
-        pcall(function()
-            local posix_sys = require("posix.sys.wait")
-            posix_sys.wait(self._async_child_pid, posix_sys.WNOHANG)
-        end)
-        self._async_child_pid = nil
+    -- Reap only the child that owns this result. A stale poll from an older
+    -- request must never clear the PID of a newer request.
+    local tracked_pid = self._async_child_pid
+    local owns_result = not self._async_result_file or self._async_result_file == result_file
+    if tracked_pid and owns_result and (not expected_pid or expected_pid == tracked_pid) then
+        self:_reapAsyncChild(tracked_pid, true)
     end
 
     -- Parse: first line = code, second line = provider, rest = response body
@@ -859,24 +925,45 @@ function AIHelper:checkAsyncResult(result_file)
     end
 end
 
-function AIHelper:cancelAsyncChild()
-    if self._async_child_pid then
-        self:log("AIHelper: Cancelling async child process PID " .. tostring(self._async_child_pid))
-        pcall(function()
-            local ffi = require("ffi")
-            ffi.cdef[[
-                int kill(int pid, int sig);
-                int waitpid(int pid, int *status, int options);
-            ]]
-            ffi.C.kill(self._async_child_pid, 9) -- SIGKILL
-            ffi.C.waitpid(self._async_child_pid, nil, 1) -- WNOHANG = 1
-        end)
-        pcall(function()
-            local posix_sys = require("posix.sys.wait")
-            posix_sys.wait(self._async_child_pid, posix_sys.WNOHANG)
-        end)
-        self._async_child_pid = nil
+function AIHelper:cancelAsyncChild(expected_pid)
+    local pid = self._async_child_pid
+    if not pid then return false end
+    if expected_pid and expected_pid ~= pid then
+        self:log("AIHelper: Refusing to cancel stale PID " .. tostring(expected_pid) .. "; active PID is " .. tostring(pid))
+        return false
     end
+
+    self:log("AIHelper: Cancelling async child process PID " .. tostring(pid))
+    local result_file = self._async_result_file
+    local cancelled = false
+    local ffiutil = getFFIUtil()
+
+    if self._async_child_uses_process_group and ffiutil
+        and ffiutil.terminateSubProcess and ffiutil.isSubProcessDone then
+        local ok, done = pcall(function()
+            -- runInSubProcess creates the process group inside the child.
+            -- Also signal the PID directly in case cancellation wins that race.
+            self:_killAsyncPID(pid, false)
+            ffiutil.terminateSubProcess(pid)
+            return ffiutil.isSubProcessDone(pid, true)
+        end)
+        cancelled = ok and done == true
+    end
+
+    if not cancelled then
+        cancelled = self:_killAsyncPID(pid, true)
+    end
+
+    if not cancelled then
+        self:log("AIHelper: Failed to terminate async child PID " .. tostring(pid))
+        return false
+    end
+
+    self:_clearAsyncChildState(pid)
+    if result_file then
+        pcall(function() os.remove(result_file) end)
+    end
+    return true
 end
 
 function AIHelper:init(path)
