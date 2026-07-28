@@ -335,6 +335,23 @@ describe("AIHelper", function()
             assert.are.equal('{"characters":[]}', response.choices[1].message.content)
         end)
 
+        it("accepts normal finish reasons when the DONE sentinel is missing", function()
+            for _, finish_reason in ipairs({ "stop", "length" }) do
+                local stream = "data: " .. json.encode({
+                    choices = {{
+                        delta = { content = '{"characters":[]}' },
+                        finish_reason = finish_reason,
+                    }},
+                }) .. "\n\n"
+
+                local normalized = AIHelper:normalizeOpenRouterStream(stream, "openai")
+                assert.is_not_nil(normalized)
+                local response = json.decode(normalized)
+                assert.are.equal(finish_reason, response.choices[1].finish_reason)
+                assert.are.equal('{"characters":[]}', response.choices[1].message.content)
+            end
+        end)
+
         it("surfaces mid-stream provider errors", function()
             local stream = "data: " .. json.encode({
                 error = { code = 502, message = "Provider disconnected" },
@@ -344,6 +361,24 @@ describe("AIHelper", function()
             local normalized, err = AIHelper:normalizeOpenRouterStream(stream, "openai")
             assert.is_nil(normalized)
             assert.are.equal("Provider disconnected", err)
+        end)
+
+        it("surfaces Anthropic Messages error details", function()
+            local stream = table.concat({
+                "event: error",
+                "data: " .. json.encode({
+                    type = "error",
+                    error = {
+                        type = "overloaded_error",
+                        message = "Overloaded",
+                    },
+                }),
+                "",
+            }, "\n") .. "\n"
+
+            local normalized, err = AIHelper:normalizeOpenRouterStream(stream, "anthropic")
+            assert.is_nil(normalized)
+            assert.are.equal("Overloaded", err)
         end)
 
         it("rejects incomplete streams instead of accepting partial output", function()
@@ -411,6 +446,29 @@ describe("AIHelper", function()
     end)
 
     describe("async child cancellation", function()
+        it("reuses the module-level FFI fallback when ffiutil is unavailable", function()
+            local old_ffiutil = package.loaded["ffi/util"]
+            local old_ffiutil_alias = package.loaded["ffiutil"]
+            local old_preload = package.preload["ffi/util"]
+            local old_preload_alias = package.preload["ffiutil"]
+            package.loaded["ffi/util"] = nil
+            package.loaded["ffiutil"] = nil
+            package.preload["ffi/util"] = function() error("ffiutil unavailable") end
+            package.preload["ffiutil"] = function() error("ffiutil unavailable") end
+
+            local ok, err = pcall(function()
+                for _ = 1, 3 do
+                    assert.is_true(AIHelper:_isAsyncChildDone(2147483647))
+                end
+            end)
+
+            package.loaded["ffi/util"] = old_ffiutil
+            package.loaded["ffiutil"] = old_ffiutil_alias
+            package.preload["ffi/util"] = old_preload
+            package.preload["ffiutil"] = old_preload_alias
+            if not ok then error(err) end
+        end)
+
         it("terminates immediately and reaps only the expected child in the background", function()
             local old_ffiutil = package.loaded["ffi/util"]
             local old_terminate = AIHelper._terminateAsyncProcess
@@ -486,6 +544,50 @@ describe("AIHelper", function()
             AIHelper._async_result_file = nil
             AIHelper._async_children_to_reap = nil
             pcall(function() os.remove(result_file) end)
+            if not ok then error(err) end
+        end)
+
+        it("stops reaper polling after bounded backoff", function()
+            local UIManager = require("ui/uimanager")
+            local old_schedule = UIManager.scheduleIn
+            local old_is_done = AIHelper._isAsyncChildDone
+            local old_log = AIHelper.log
+            local scheduled = {}
+            local delays = {}
+            local logs = {}
+
+            UIManager.scheduleIn = function(self, delay, callback)
+                table.insert(delays, delay)
+                table.insert(scheduled, callback)
+            end
+            AIHelper._isAsyncChildDone = function() return false end
+            AIHelper.log = function(self, message)
+                table.insert(logs, message)
+            end
+            AIHelper._async_children_to_reap = nil
+
+            local ok, err = pcall(function()
+                assert.is_true(AIHelper:_scheduleAsyncChildReap(7777))
+                local callbacks_run = 0
+                while #scheduled > 0 do
+                    callbacks_run = callbacks_run + 1
+                    table.remove(scheduled, 1)()
+                    assert.is_true(callbacks_run <= 10)
+                end
+
+                assert.are.equal(10, callbacks_run)
+                assert.are.equal(10, #delays)
+                assert.are.equal(0.1, delays[1])
+                assert.are.equal(0.2, delays[2])
+                assert.are.equal(1, delays[5])
+                assert.is_nil(AIHelper._async_children_to_reap)
+                assert.is_true(logs[#logs]:find("Timed out waiting to collect", 1, true) ~= nil)
+            end)
+
+            UIManager.scheduleIn = old_schedule
+            AIHelper._isAsyncChildDone = old_is_done
+            AIHelper.log = old_log
+            AIHelper._async_children_to_reap = nil
             if not ok then error(err) end
         end)
     end)

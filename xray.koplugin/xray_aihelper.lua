@@ -5,6 +5,29 @@ local ok_ltn12, ltn12 = pcall(require, "ltn12")
 local ok_socket, socket = pcall(require, "socket")
 local ok_socketutil, socketutil = pcall(require, "socketutil")
 
+local process_ffi
+do
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi then
+        pcall(function()
+            ffi.cdef[[
+                int close(int fd);
+                int fork(void);
+                int kill(int pid, int sig);
+                int waitpid(int pid, int *status, int options);
+                void _exit(int status);
+            ]]
+        end)
+        process_ffi = ffi
+    end
+end
+
+local SIGKILL = 9
+local WNOHANG = 1
+local REAP_INITIAL_DELAY = 0.1
+local REAP_MAX_DELAY = 1
+local REAP_MAX_ATTEMPTS = 10
+
 local logger = require("logger")
 local plugin_path = ((...) or ""):match("(.-)[^%.]+$") or ""
 local XRayLogger = require(plugin_path .. "xray_logger")
@@ -485,10 +508,9 @@ function AIHelper:_isAsyncChildDone(pid)
         if ok then return done == true end
     end
 
+    if not process_ffi then return false end
     local ok, done = pcall(function()
-        local ffi = require("ffi")
-        ffi.cdef[[ int waitpid(int pid, int *status, int options); ]]
-        local result = ffi.C.waitpid(pid, nil, 1) -- WNOHANG
+        local result = process_ffi.C.waitpid(pid, nil, WNOHANG)
         return result == pid or result == -1
     end)
     return ok and done == true
@@ -507,14 +529,13 @@ function AIHelper:_reapAsyncChild(pid)
 end
 
 function AIHelper:_terminateAsyncProcess(pid, use_process_group)
+    if not process_ffi then return false end
     local ok, termination_requested = pcall(function()
-        local ffi = require("ffi")
-        ffi.cdef[[ int kill(int pid, int sig); ]]
         local group_killed = false
         if use_process_group then
-            group_killed = ffi.C.kill(-pid, 9) == 0 -- SIGKILL
+            group_killed = process_ffi.C.kill(-pid, SIGKILL) == 0
         end
-        local child_killed = ffi.C.kill(pid, 9) == 0
+        local child_killed = process_ffi.C.kill(pid, SIGKILL) == 0
         return group_killed or child_killed
     end)
     return ok and termination_requested == true
@@ -531,19 +552,32 @@ function AIHelper:_scheduleAsyncChildReap(pid)
         return false
     end
 
-    local collect
-    collect = function()
-        if self:_isAsyncChildDone(pid) then
-            self._async_children_to_reap[pid] = nil
-            if not next(self._async_children_to_reap) then
-                self._async_children_to_reap = nil
-            end
-            self:log("AIHelper: Collected async child process PID " .. tostring(pid))
-        else
-            UIManager:scheduleIn(0.1, collect)
+    local attempts = 0
+    local delay = REAP_INITIAL_DELAY
+    local function stopTracking()
+        local pending = self._async_children_to_reap
+        if not pending then return end
+        pending[pid] = nil
+        if not next(pending) then
+            self._async_children_to_reap = nil
         end
     end
-    UIManager:scheduleIn(0.1, collect)
+
+    local collect
+    collect = function()
+        attempts = attempts + 1
+        if self:_isAsyncChildDone(pid) then
+            stopTracking()
+            self:log("AIHelper: Collected async child process PID " .. tostring(pid))
+        elseif attempts >= REAP_MAX_ATTEMPTS then
+            stopTracking()
+            self:log("AIHelper: Timed out waiting to collect async child PID " .. tostring(pid))
+        else
+            delay = math.min(delay * 2, REAP_MAX_DELAY)
+            UIManager:scheduleIn(delay, collect)
+        end
+    end
+    UIManager:scheduleIn(delay, collect)
     return true
 end
 
@@ -554,6 +588,7 @@ function AIHelper:normalizeOpenRouterStream(response_text, stream_format)
 
     local content = {}
     local stream_complete = false
+    local finish_reason = "stop"
 
     local normalized_stream = (response_text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
     for event_block in (normalized_stream .. "\n\n"):gmatch("(.-)\n\n") do
@@ -585,8 +620,13 @@ function AIHelper:normalizeOpenRouterStream(response_text, stream_format)
                 if delta and type(delta.content) == "string" then
                     table.insert(content, delta.content)
                 end
-                if choice and choice.finish_reason == "error" then
-                    return nil, "OpenRouter stream failed"
+                if choice then
+                    if choice.finish_reason == "error" then
+                        return nil, "OpenRouter stream failed"
+                    elseif choice.finish_reason == "stop" or choice.finish_reason == "length" then
+                        finish_reason = choice.finish_reason
+                        stream_complete = true
+                    end
                 end
             else
                 if event.type == "content_block_start"
@@ -623,7 +663,7 @@ function AIHelper:normalizeOpenRouterStream(response_text, stream_format)
     end
     return json.encode({
         choices = {{
-            finish_reason = "stop",
+            finish_reason = finish_reason,
             message = { role = "assistant", content = text },
         }},
     })
@@ -888,20 +928,16 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         end
 
         -- Close write_fd if provided by runInSubProcess
-        if write_fd and write_fd > 0 then
-            pcall(function() 
-                local ffi = require("ffi")
-                ffi.cdef[[ int close(int fd); ]]
-                ffi.C.close(write_fd) 
+        if process_ffi and write_fd and write_fd > 0 then
+            pcall(function()
+                process_ffi.C.close(write_fd)
             end)
         end
 
         -- Exit child cleanly
-        local ffi_ok, ffi = pcall(require, "ffi")
-        if ffi_ok then
+        if process_ffi then
             pcall(function()
-                ffi.cdef[[ void _exit(int status); ]]
-                ffi.C._exit(0)
+                process_ffi.C._exit(0)
             end)
         end
         local posix_ok, posix = pcall(require, "posix.unistd")
@@ -919,11 +955,9 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         if pid and pid > 0 then
             self:log("AIHelper: runInSubProcess started PID " .. tostring(pid))
             -- We don't need the pipe for now as we use the result_file
-            if read_fd and read_fd > 0 then
-                pcall(function() 
-                    local ffi = require("ffi")
-                    ffi.cdef[[ int close(int fd); ]]
-                    ffi.C.close(read_fd) 
+            if process_ffi and read_fd and read_fd > 0 then
+                pcall(function()
+                    process_ffi.C.close(read_fd)
                 end)
             end
             self._async_child_pid = pid
@@ -942,14 +976,10 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         if not ok_posix then ok_posix, posix = pcall(require, "posix") end
         if ok_posix and posix and posix.fork then
             fork = posix.fork
-        else
-            local ok_f, ffi = pcall(require, "ffi")
-            if ok_f then
-                pcall(function()
-                    ffi.cdef[[ int fork(void); ]]
-                    fork = ffi.C.fork
-                end)
-            end
+        elseif process_ffi then
+            pcall(function()
+                fork = process_ffi.C.fork
+            end)
         end
     end
     
