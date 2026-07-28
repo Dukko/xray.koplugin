@@ -3,6 +3,20 @@ require("spec.spec_helper")
 local analyzer = require("xray_chapteranalyzer")
 
 describe("xray_chapteranalyzer", function()
+    describe("getEndPageForCurrentPage", function()
+        it("uses the next page as the end XPointer for reflowable documents", function()
+            local ui = { rolling = {} }
+
+            assert.are.equal(26, analyzer:getEndPageForCurrentPage(ui, 25))
+        end)
+
+        it("uses the current page as the inclusive end for page-based documents", function()
+            local ui = { paging = {} }
+
+            assert.are.equal(25, analyzer:getEndPageForCurrentPage(ui, 25))
+        end)
+    end)
+
     describe("countMentions", function()
         it("counts exact mentions correctly", function()
             local text = "Alice went to the park. Alice saw a bird."
@@ -128,6 +142,28 @@ describe("xray_chapteranalyzer", function()
             assert.are.equal("xp_page_80", getTextFromXPointers_calls[1].end_xp)
             assert.are.equal("some mock text extracted", text)
         end)
+
+        it("does not extract the next page from a page-based document", function()
+            local getPageText_calls = {}
+            local paged_ui = {
+                paging = {},
+                document = {
+                    getPageText = function(self, page)
+                        table.insert(getPageText_calls, page)
+                        return "text from page " .. page
+                    end,
+                },
+            }
+            local current_page = 25
+            local end_page = analyzer:getEndPageForCurrentPage(paged_ui, current_page)
+
+            local text = analyzer:getTextForAnalysis(paged_ui, 50000, nil, end_page, 20)
+
+            assert.are.equal(6, #getPageText_calls)
+            assert.are.equal(20, getPageText_calls[1])
+            assert.are.equal(25, getPageText_calls[#getPageText_calls])
+            assert.is_nil(text:find("text from page 26", 1, true))
+        end)
     end)
 
     describe("getDetailedChapterSamples", function()
@@ -189,6 +225,39 @@ describe("xray_chapteranalyzer", function()
             assert.are.equal("xp_page_26", getTextFromXPointers_calls[1].end_xp)
         end)
 
+        it("spoiler-free mode does not sample beyond the current PDF page", function()
+            local getPageText_calls = {}
+            local paged_ui = {
+                paging = {},
+                document = {
+                    getToc = function()
+                        return {
+                            { title = "Chapter 1", page = 20, xpointer = "page:20" },
+                            { title = "Chapter 2", page = 40, xpointer = "page:40" },
+                        }
+                    end,
+                    getPageText = function(self, page)
+                        table.insert(getPageText_calls, page)
+                        return string.rep("page " .. page .. " text ", 20)
+                    end,
+                },
+                view = {
+                    state = { page = 25 },
+                },
+            }
+
+            local samples, titles = analyzer:getDetailedChapterSamples(paged_ui, 100, 60000, false)
+
+            assert.is_not_nil(samples)
+            assert.are.equal(1, #titles)
+            assert.are.equal("Chapter 1", titles[1])
+            assert.are.equal(20, getPageText_calls[1])
+            assert.are.equal(25, getPageText_calls[#getPageText_calls])
+            for _, page in ipairs(getPageText_calls) do
+                assert.is_true(page <= 25)
+            end
+        end)
+
         it("spoiler-free mode limits NO TOC fallback range to current page", function()
             -- Mock no TOC
             mock_ui.document.getToc = function() return nil end
@@ -233,4 +302,3 @@ describe("xray_chapteranalyzer", function()
         end)
     end)
 end)
-

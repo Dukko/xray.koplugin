@@ -93,7 +93,7 @@ function M:fetchSingleWord(text, pos0, pos1)
             progress_msg:reportProgress(30)
             
             -- 2. Immediate book text (Previous and Current page for maximum context relevance)
-            local end_page = current_page + 1
+            local end_page = self.chapter_analyzer:getEndPageForCurrentPage(self.ui, current_page)
             local book_text = self.chapter_analyzer:getTextFromPageRange(self.ui, math.max(1, current_page - 1), end_page, 25000)
             
             local context_prefix = "SEARCH TARGET: \"" .. text .. "\"\n"
@@ -415,7 +415,7 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
         local end_page_analysis = current_page
         local spoiler_setting = self.ai_helper and self.ai_helper.settings and self.ai_helper.settings.spoiler_setting or "spoiler_free"
         if spoiler_setting ~= "full_book" then
-            end_page_analysis = current_page + 1
+            end_page_analysis = self.chapter_analyzer:getEndPageForCurrentPage(self.ui, current_page)
         end
         local book_text = self.chapter_analyzer:getTextForAnalysis(self.ui, 20000, nil, end_page_analysis, first_missing_page)
         local known_chapters = {}
