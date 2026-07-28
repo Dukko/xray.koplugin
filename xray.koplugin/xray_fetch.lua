@@ -137,8 +137,8 @@ function M:fetchSingleWord(text, pos0, pos1)
             if self.destroyed then return end
 
             local result_file = settings_xray_dir .. "/sw_fetch_" .. tostring(os.time()) .. ".json"
-            local started = self.ai_helper:lookupSingleWordAsync(text, context, result_file)
-            if not started then
+            local request_pid = self.ai_helper:lookupSingleWordAsync(text, context, result_file)
+            if not request_pid then
                 if progress_msg then UIManager:close(progress_msg) end
                 self:log("XRayPlugin: Failed to start async lookup")
                 return
@@ -152,7 +152,7 @@ function M:fetchSingleWord(text, pos0, pos1)
             local function poll()
                 if self.destroyed then
                     if self.ai_helper and self.ai_helper.cancelAsyncChild then
-                        self.ai_helper:cancelAsyncChild()
+                        self.ai_helper:cancelAsyncChild(request_pid)
                     end
                     pcall(function() os.remove(result_file) end)
                     self:log("XRayPlugin: Single word lookup cancelled or plugin destroyed")
@@ -172,7 +172,7 @@ function M:fetchSingleWord(text, pos0, pos1)
                 end
                 
                 poll_count = poll_count + 1
-                local data, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file)
+                local data, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file, request_pid)
                 if data == nil then
                     if poll_count < max_polls then
                         UIManager:scheduleIn(2, poll)
@@ -1056,7 +1056,7 @@ function M:runPostFetchDuplicateCheck(title, author, reading_percent, is_silent)
                 return
             end
             poll_count = poll_count + 1
-            local data, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file)
+            local data, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file, pid)
             if data == nil then
                 if poll_count < max_polls then
                     UIManager:scheduleIn(2, poll)

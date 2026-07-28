@@ -506,13 +506,18 @@ function AIHelper:_reapAsyncChild(pid)
     return false
 end
 
-function AIHelper:_killAsyncPID(pid)
-    local ok, result = pcall(function()
+function AIHelper:_terminateAsyncProcess(pid, use_process_group)
+    local ok, termination_requested = pcall(function()
         local ffi = require("ffi")
         ffi.cdef[[ int kill(int pid, int sig); ]]
-        return ffi.C.kill(pid, 9) -- SIGKILL
+        local group_killed = false
+        if use_process_group then
+            group_killed = ffi.C.kill(-pid, 9) == 0 -- SIGKILL
+        end
+        local child_killed = ffi.C.kill(pid, 9) == 0
+        return group_killed or child_killed
     end)
-    return ok and result == 0
+    return ok and termination_requested == true
 end
 
 function AIHelper:_scheduleAsyncChildReap(pid)
@@ -550,46 +555,53 @@ function AIHelper:normalizeOpenRouterStream(response_text, stream_format)
     local content = {}
     local stream_complete = false
 
-    for line in ((response_text or "") .. "\n"):gmatch("(.-)\n") do
-        line = line:gsub("\r$", "")
-        if line:sub(1, 5) == "data:" then
-            local payload = line:sub(6):match("^%s*(.-)%s*$")
-            if payload == "[DONE]" then
-                stream_complete = true
-            elseif payload ~= "" then
-                local ok, event = pcall(json.decode, payload)
-                if not ok or type(event) ~= "table" then
-                    return nil, "OpenRouter returned malformed stream data"
-                end
-                if event.error then
-                    local message = type(event.error) == "table" and event.error.message or event.error
-                    return nil, tostring(message or "OpenRouter stream failed")
-                end
+    local normalized_stream = (response_text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    for event_block in (normalized_stream .. "\n\n"):gmatch("(.-)\n\n") do
+        local data_lines = {}
+        for line in (event_block .. "\n"):gmatch("(.-)\n") do
+            local data = line:match("^data:(.*)$")
+            if data then
+                local value = data:gsub("^ ", "")
+                table.insert(data_lines, value)
+            end
+        end
 
-                if stream_format == "openai" then
-                    local choice = event.choices and event.choices[1]
-                    local delta = choice and choice.delta
-                    if delta and type(delta.content) == "string" then
-                        table.insert(content, delta.content)
-                    end
-                    if choice and choice.finish_reason == "error" then
-                        return nil, "OpenRouter stream failed"
-                    end
-                else
-                    if event.type == "content_block_start"
-                        and event.content_block
-                        and type(event.content_block.text) == "string" then
-                        table.insert(content, event.content_block.text)
-                    elseif event.type == "content_block_delta"
-                        and event.delta
-                        and event.delta.type == "text_delta"
-                        and type(event.delta.text) == "string" then
-                        table.insert(content, event.delta.text)
-                    elseif event.type == "message_stop" then
-                        stream_complete = true
-                    elseif event.type == "error" then
-                        return nil, "OpenRouter stream failed"
-                    end
+        local payload = table.concat(data_lines, "\n")
+        if payload == "[DONE]" then
+            stream_complete = true
+        elseif payload ~= "" then
+            local ok, event = pcall(json.decode, payload)
+            if not ok or type(event) ~= "table" then
+                return nil, "OpenRouter returned malformed stream data"
+            end
+            if event.error then
+                local message = type(event.error) == "table" and event.error.message or event.error
+                return nil, tostring(message or "OpenRouter stream failed")
+            end
+
+            if stream_format == "openai" then
+                local choice = event.choices and event.choices[1]
+                local delta = choice and choice.delta
+                if delta and type(delta.content) == "string" then
+                    table.insert(content, delta.content)
+                end
+                if choice and choice.finish_reason == "error" then
+                    return nil, "OpenRouter stream failed"
+                end
+            else
+                if event.type == "content_block_start"
+                    and event.content_block
+                    and type(event.content_block.text) == "string" then
+                    table.insert(content, event.content_block.text)
+                elseif event.type == "content_block_delta"
+                    and event.delta
+                    and event.delta.type == "text_delta"
+                    and type(event.delta.text) == "string" then
+                    table.insert(content, event.delta.text)
+                elseif event.type == "message_stop" then
+                    stream_complete = true
+                elseif event.type == "error" then
+                    return nil, "OpenRouter stream failed"
                 end
             end
         end
@@ -622,6 +634,10 @@ function AIHelper:makeRequestAsync(request_params, result_file)
     if self._async_child_pid and not self:_reapAsyncChild(self._async_child_pid) then
         self:log("AIHelper: Cannot start async request while PID " .. tostring(self._async_child_pid) .. " is still active")
         return false
+    end
+
+    if result_file then
+        pcall(function() os.remove(result_file) end)
     end
 
     local ffiutil = getFFIUtil()
@@ -960,6 +976,15 @@ end
 --   book_data table (success)
 --   false, error_code, error_msg (failed)
 function AIHelper:checkAsyncResult(result_file, expected_pid)
+    if expected_pid then
+        local owns_expected_request = self._async_child_pid == expected_pid
+            and self._async_result_file == result_file
+        if not owns_expected_request then
+            self:log("AIHelper: Ignoring stale async result poll for PID " .. tostring(expected_pid))
+            return false, "error_stale", "Async result belongs to a different request"
+        end
+    end
+
     local f = io.open(result_file, "r")
     if not f then return nil end  -- still pending
 
@@ -1063,19 +1088,13 @@ function AIHelper:cancelAsyncChild(expected_pid)
 
     self:log("AIHelper: Cancelling async child process PID " .. tostring(pid))
     local result_file = self._async_result_file
-    local termination_requested = false
-    local ffiutil = getFFIUtil()
-
-    if self._async_child_uses_process_group and ffiutil
-        and ffiutil.terminateSubProcess then
-        local ok = pcall(function()
-            ffiutil.terminateSubProcess(pid)
-        end)
-        termination_requested = ok
-    end
-    -- runInSubProcess creates the process group inside the child. Also signal
-    -- the PID directly in case cancellation happens before setpgid().
-    termination_requested = self:_killAsyncPID(pid) or termination_requested
+    -- Signal the process group without first calling a helper that may reap
+    -- the child. Also signal the PID in case cancellation happens before the
+    -- child creates its process group.
+    local termination_requested = self:_terminateAsyncProcess(
+        pid,
+        self._async_child_uses_process_group
+    )
 
     if not termination_requested and not self:_reapAsyncChild(pid) then
         self:log("AIHelper: Failed to terminate async child PID " .. tostring(pid))

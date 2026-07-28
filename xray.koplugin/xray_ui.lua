@@ -4387,8 +4387,8 @@ function M:checkSeriesContext()
     local DataStorage = require("datastorage")
     local result_file = DataStorage:getSettingsDir() .. "/xray/bg_series_detect_" .. tostring(os.time()) .. ".json"
     
-    local started = self.ai_helper:makeRequestAsync(req_params, result_file)
-    if not started then
+    local request_pid = self.ai_helper:makeRequestAsync(req_params, result_file)
+    if not request_pid then
         self:log("XRayPlugin: Series: Async check not supported/failed (e.g. on Windows). Skipping automatic AI fallback.")
         return
     end
@@ -4405,7 +4405,7 @@ function M:checkSeriesContext()
             return
         end
         poll_count = poll_count + 1
-        local result, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file)
+        local result, p_err_code, p_err_msg = self.ai_helper:checkAsyncResult(result_file, request_pid)
         if result == nil then
             if poll_count < max_polls then
                 UIManager:scheduleIn(2, pollDetect)

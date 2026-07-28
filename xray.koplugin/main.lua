@@ -2201,6 +2201,16 @@ function XRayPlugin:triggerBookTypeDetection()
     end
     local cached = self.book_data
 
+    local function newBookTypeResultFile()
+        local DataStorage = require("datastorage")
+        return string.format(
+            "%s/xray/book_type_detect_res_%d_%d.json",
+            DataStorage:getDataDir(),
+            os.time(),
+            math.random(1000, 9999)
+        )
+    end
+
     -- Check if we already have a unit cache first to avoid scans
     local has_unit_cache = false
     if self.loadUnitCache then
@@ -2236,8 +2246,7 @@ function XRayPlugin:triggerBookTypeDetection()
         -- If the cached label was not detected by AI, check if we should refine it via AI background process
         if not cached.book_type_detected_by_ai and self.ai_helper:hasApiKey() then
             -- Trigger AI in background to refine low-confidence or format-fallback guesses
-            local DataStorage = require("datastorage")
-            local result_file = DataStorage:getDataDir() .. "/xray/book_type_detect_res.json"
+            local result_file = newBookTypeResultFile()
             local props = self.ui.document:getProps() or {}
             local title = props.title or "Unknown"
             local author = props.authors or "Unknown"
@@ -2247,8 +2256,8 @@ function XRayPlugin:triggerBookTypeDetection()
             if pid then
                 local function pollResult()
                     if self.destroyed then return end
-                    local res = self.ai_helper:checkAsyncResult(result_file)
-                    if res == "pending" then
+                    local res = self.ai_helper:checkAsyncResult(result_file, pid)
+                    if res == nil then
                         UIManager:scheduleIn(1, pollResult)
                     elseif type(res) == "table" and res.book_type_label then
                         cached.book_type_label = res.book_type_label
@@ -2282,8 +2291,7 @@ function XRayPlugin:triggerBookTypeDetection()
                 return true
             end
             self:log("XRayPlugin: Starting Layer 3 AI book type refinement in background...")
-            local DataStorage = require("datastorage")
-            local result_file = DataStorage:getDataDir() .. "/xray/book_type_detect_res.json"
+            local result_file = newBookTypeResultFile()
             local props = self.ui.document:getProps() or {}
             local title = props.title or "Unknown"
             local author = props.authors or "Unknown"
@@ -2293,8 +2301,8 @@ function XRayPlugin:triggerBookTypeDetection()
             if pid then
                 local function pollResult()
                     if self.destroyed then return end
-                    local res = self.ai_helper:checkAsyncResult(result_file)
-                    if res == "pending" then
+                    local res = self.ai_helper:checkAsyncResult(result_file, pid)
+                    if res == nil then
                         UIManager:scheduleIn(1, pollResult)
                     elseif type(res) == "table" and res.book_type_label then
                         self:log("XRayPlugin: Book type AI refinement complete! Result: " .. tostring(res.book_type_label))
@@ -2316,8 +2324,7 @@ function XRayPlugin:triggerBookTypeDetection()
     end
 
     self:log("XRayPlugin: Starting Layer 3 AI book type detection in background...")
-    local DataStorage = require("datastorage")
-    local result_file = DataStorage:getDataDir() .. "/xray/book_type_detect_res.json"
+    local result_file = newBookTypeResultFile()
     
     local props = self.ui.document:getProps() or {}
     local title = props.title or "Unknown"
@@ -2334,8 +2341,8 @@ function XRayPlugin:triggerBookTypeDetection()
 
     local function pollResult()
         if self.destroyed then return end
-        local res = self.ai_helper:checkAsyncResult(result_file)
-        if res == "pending" then
+        local res = self.ai_helper:checkAsyncResult(result_file, pid)
+        if res == nil then
             UIManager:scheduleIn(1, pollResult)
         elseif type(res) == "table" and res.book_type_label then
             self:log("XRayPlugin: Book type AI detection complete! Result: " .. tostring(res.book_type_label))

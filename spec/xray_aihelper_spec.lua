@@ -282,10 +282,12 @@ describe("AIHelper", function()
             local stream = table.concat({
                 ": OPENROUTER PROCESSING",
                 "data: " .. json.encode({ choices = {{ delta = { content = '{"characters":' } }} }),
+                "",
                 "data: " .. json.encode({ choices = {{ delta = { content = "[]}" }, finish_reason = "stop" }} }),
+                "",
                 "data: [DONE]",
                 "",
-            }, "\r\n")
+            }, "\r\n") .. "\r\n"
 
             local normalized = AIHelper:normalizeOpenRouterStream(stream, "openai")
             assert.is_not_nil(normalized)
@@ -300,20 +302,37 @@ describe("AIHelper", function()
                     type = "content_block_start",
                     content_block = { type = "text", text = '{"locations":' },
                 }),
+                "",
                 "event: content_block_delta",
                 "data: " .. json.encode({
                     type = "content_block_delta",
                     delta = { type = "text_delta", text = "[]}" },
                 }),
+                "",
                 "event: message_stop",
                 "data: " .. json.encode({ type = "message_stop" }),
                 "",
-            }, "\n")
+            }, "\n") .. "\n"
 
             local normalized = AIHelper:normalizeOpenRouterStream(stream, "anthropic")
             assert.is_not_nil(normalized)
             local response = json.decode(normalized)
             assert.are.equal('{"locations":[]}', response.content[1].text)
+        end)
+
+        it("joins multiple data lines in one SSE event", function()
+            local stream = table.concat({
+                "data: {\"choices\":",
+                "data: [{\"delta\":{\"content\":\"{\\\"characters\\\":[]}\"}}]}",
+                "",
+                "data: [DONE]",
+                "",
+            }, "\n") .. "\n"
+
+            local normalized = AIHelper:normalizeOpenRouterStream(stream, "openai")
+            assert.is_not_nil(normalized)
+            local response = json.decode(normalized)
+            assert.are.equal('{"characters":[]}', response.choices[1].message.content)
         end)
 
         it("surfaces mid-stream provider errors", function()
@@ -338,10 +357,63 @@ describe("AIHelper", function()
         end)
     end)
 
+    describe("async result ownership", function()
+        it("removes a pre-existing result before starting a request", function()
+            local old_ffiutil = package.loaded["ffi/util"]
+            local result_file = os.tmpname()
+            local file = io.open(result_file, "w")
+            assert.is_not_nil(file)
+            file:write("stale result")
+            file:close()
+
+            package.loaded["ffi/util"] = {
+                runInSubProcess = function()
+                    return 3333
+                end,
+            }
+
+            local pid = AIHelper:makeRequestAsync({}, result_file)
+            assert.are.equal(3333, pid)
+            assert.is_nil(io.open(result_file, "r"))
+
+            package.loaded["ffi/util"] = old_ffiutil
+            AIHelper._async_child_pid = nil
+            AIHelper._async_child_uses_process_group = nil
+            AIHelper._async_result_file = nil
+            os.remove(result_file)
+        end)
+
+        it("does not consume a newer request's result from a stale poll", function()
+            local result_file = os.tmpname()
+            local file = io.open(result_file, "w")
+            assert.is_not_nil(file)
+            file:write("new request result")
+            file:close()
+
+            AIHelper._async_child_pid = 2222
+            AIHelper._async_result_file = result_file
+
+            local result, err_code = AIHelper:checkAsyncResult(result_file, 1111)
+            assert.is_false(result)
+            assert.are.equal("error_stale", err_code)
+            assert.are.equal(2222, AIHelper._async_child_pid)
+            assert.are.equal(result_file, AIHelper._async_result_file)
+
+            local untouched = io.open(result_file, "r")
+            assert.is_not_nil(untouched)
+            assert.are.equal("new request result", untouched:read("*a"))
+            untouched:close()
+
+            AIHelper._async_child_pid = nil
+            AIHelper._async_result_file = nil
+            os.remove(result_file)
+        end)
+    end)
+
     describe("async child cancellation", function()
         it("terminates immediately and reaps only the expected child in the background", function()
             local old_ffiutil = package.loaded["ffi/util"]
-            local old_kill = AIHelper._killAsyncPID
+            local old_terminate = AIHelper._terminateAsyncProcess
             local UIManager = require("ui/uimanager")
             local old_schedule = UIManager.scheduleIn
             local calls = {}
@@ -349,15 +421,19 @@ describe("AIHelper", function()
             local reap_results = { false, false, true }
             package.loaded["ffi/util"] = {
                 terminateSubProcess = function(pid)
-                    table.insert(calls, { action = "terminate", pid = pid })
+                    error("cancelAsyncChild must not call a helper that reaps before signalling")
                 end,
                 isSubProcessDone = function(pid, wait)
                     table.insert(calls, { action = "reap", pid = pid, wait = wait })
                     return table.remove(reap_results, 1)
                 end,
             }
-            AIHelper._killAsyncPID = function(self, pid)
-                table.insert(calls, { action = "kill", pid = pid })
+            AIHelper._terminateAsyncProcess = function(self, pid, use_process_group)
+                table.insert(calls, {
+                    action = "terminate",
+                    pid = pid,
+                    use_process_group = use_process_group,
+                })
                 return true
             end
             UIManager.scheduleIn = function(self, delay, callback)
@@ -380,30 +456,30 @@ describe("AIHelper", function()
 
                 assert.is_true(AIHelper:cancelAsyncChild(4321))
                 assert.are.equal("terminate", calls[1].action)
-                assert.are.equal("kill", calls[2].action)
                 assert.are.equal(4321, calls[1].pid)
-                assert.are.equal("reap", calls[3].action)
-                assert.is_nil(calls[3].wait)
+                assert.is_true(calls[1].use_process_group)
+                assert.are.equal("reap", calls[2].action)
+                assert.is_nil(calls[2].wait)
                 assert.is_nil(AIHelper._async_child_pid)
                 assert.is_nil(AIHelper._async_result_file)
                 assert.is_nil(io.open(result_file, "r"))
                 assert.are.equal(1, #scheduled)
 
                 table.remove(scheduled, 1)()
-                assert.are.equal("reap", calls[4].action)
-                assert.is_nil(calls[4].wait)
+                assert.are.equal("reap", calls[3].action)
+                assert.is_nil(calls[3].wait)
                 assert.are.equal(1, #scheduled)
                 assert.is_true(AIHelper._async_children_to_reap[4321])
 
                 table.remove(scheduled, 1)()
-                assert.are.equal("reap", calls[5].action)
-                assert.is_nil(calls[5].wait)
+                assert.are.equal("reap", calls[4].action)
+                assert.is_nil(calls[4].wait)
                 assert.is_nil(AIHelper._async_children_to_reap)
                 assert.are.equal(0, #scheduled)
             end)
 
             package.loaded["ffi/util"] = old_ffiutil
-            AIHelper._killAsyncPID = old_kill
+            AIHelper._terminateAsyncProcess = old_terminate
             UIManager.scheduleIn = old_schedule
             AIHelper._async_child_pid = nil
             AIHelper._async_child_uses_process_group = nil
