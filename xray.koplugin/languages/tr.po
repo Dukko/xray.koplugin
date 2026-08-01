@@ -329,6 +329,9 @@ msgstr "Geçersiz API Key"
 msgid "error_extract_text"
 msgstr "Hata: Kitap metni çıkarılamadı."
 
+msgid "no_new_text"
+msgstr "Mevcut konumunuzda yeni metin yoktu; X-Ray burada zaten güncel."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "API anahtarınız seçilen modele erişemiyor. Farklı bir model veya sağlayıcı kullanmanız gerekebilir."

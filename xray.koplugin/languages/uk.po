@@ -330,6 +330,9 @@ msgid "error_extract_text"
 msgstr "Помилка: не вдалося видобути текст книги."
 
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
+msgid "no_new_text"
+msgstr "У поточній позиції немає нового тексту; тут X-Ray уже оновлено."
+
 msgid "error_model_access_desc"
 msgstr "Ваш API Key не має доступу до вибраної моделі. Можливо, вам потрібно використати іншу модель або провайдера."
 

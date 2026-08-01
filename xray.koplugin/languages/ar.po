@@ -330,6 +330,9 @@ msgid "error_extract_text"
 msgstr "خطأ: تعذر استخراج نص الكتاب."
 
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
+msgid "no_new_text"
+msgstr "لم يتوفر نص جديد في موضعك الحالي؛ X-Ray محدث بالفعل هنا."
+
 msgid "error_model_access_desc"
 msgstr "مفتاح API الخاص بك لا يملك صلاحية الوصول إلى النموذج المحدد. قد تحتاج إلى استخدام نموذج أو مزود مختلف."
 

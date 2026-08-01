@@ -330,6 +330,9 @@ msgid "error_extract_text"
 msgstr "Грешка: Није могуће издвојити текст књиге."
 
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
+msgid "no_new_text"
+msgstr "Na vašoj trenutnoj poziciji nema novog teksta; X-Ray je ovde već ažuriran."
+
 msgid "error_model_access_desc"
 msgstr "Ваш АПИ кључ нема приступ изабраном моделу. Можда ћете морати да користите други модел или провајдера."
 

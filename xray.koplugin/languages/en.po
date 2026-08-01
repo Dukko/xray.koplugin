@@ -248,6 +248,9 @@ msgstr "Invalid API Key"
 msgid "error_extract_text"
 msgstr "Error: Could not extract book text."
 
+msgid "no_new_text"
+msgstr "No new text was available at your current position; X-Ray is already up to date here."
+
 msgid "error_model_access_desc"
 msgstr "Your API key does not have access to the selected model. You might need to use a different model or provider."
 

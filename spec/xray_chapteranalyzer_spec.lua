@@ -160,6 +160,26 @@ describe("xray_chapteranalyzer", function()
             assert.are.equal("some mock text extracted", text)
         end)
 
+        it("uses the fetch pipeline's resolved page for chapter sampling", function()
+            local sampling_ui = {
+                rolling = {},
+                getCurrentPage = function() return 19 end,
+                document = {
+                    getToc = function()
+                        return {
+                            { title = "Chapter 1", page = 1, xpointer = "xp_ch1" },
+                            { title = "Chapter 2", page = 250, xpointer = "xp_ch2" },
+                        }
+                    end,
+                    getTextFromXPointer = function() return string.rep("chapter text ", 20) end,
+                },
+                view = { state = { page = 19 } },
+            }
+            local _, titles = analyzer:getDetailedChapterSamples(sampling_ui, 100, 60000, false, nil, nil, 298)
+            assert.are.equal(2, #titles)
+            assert.are.equal("Chapter 2", titles[2])
+        end)
+
         it("does not extract the next page from a page-based document", function()
             local getPageText_calls = {}
             local paged_ui = {

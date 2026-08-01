@@ -329,6 +329,9 @@ msgstr "Clé API invalide"
 msgid "error_extract_text"
 msgstr "Erreur : Impossible d'extraire le texte du livre."
 
+msgid "no_new_text"
+msgstr "Aucun nouveau texte n'était disponible à votre position actuelle ; X-Ray est déjà à jour ici."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "Votre clé API n'a pas accès au modèle sélectionné. Vous devrez peut-être utiliser un modèle ou un fournisseur différent."

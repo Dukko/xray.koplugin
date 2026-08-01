@@ -329,6 +329,9 @@ msgstr "Chiave API non valida"
 msgid "error_extract_text"
 msgstr "Errore: impossibile estrarre il testo del libro."
 
+msgid "no_new_text"
+msgstr "Non era disponibile nuovo testo nella posizione attuale; X-Ray è già aggiornato qui."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "La tua chiave API non ha accesso al modello selezionato. Potrebbe essere necessario utilizzare un modello o un provider diverso."

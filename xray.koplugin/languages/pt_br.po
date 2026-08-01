@@ -329,6 +329,9 @@ msgstr "Chave de API Inválida"
 msgid "error_extract_text"
 msgstr "Erro: Não foi possível extrair o texto do livro."
 
+msgid "no_new_text"
+msgstr "Não havia texto novo disponível na posição atual; o X-Ray já está atualizado aqui."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "Sua chave de API não tem acesso ao modelo selecionado. Você pode precisar usar um modelo ou provedor diferente."

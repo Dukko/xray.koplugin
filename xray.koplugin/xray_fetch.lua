@@ -459,12 +459,30 @@ function M:continueWithFetch(reading_percent, is_update, last_fetch_page, is_sil
             if is_cancelled or self.destroyed then clearFetchState(); return end
             if not self.ui or not self.ui.document then clearFetchState(); return end
 
-            local samples, chapter_titles = self.chapter_analyzer:getDetailedChapterSamples(self.ui, 200, 150000, reading_percent == 100, first_missing_page, known_chapters)
+            -- A cached page can outlive pagination changes or be ahead of the
+            -- reader's current position. In that case an incremental XPointer
+            -- range would be empty/reversed; use the current chapter context.
+            local stale_cached_position = false
+            if first_missing_page and first_missing_page > end_page_analysis then
+                stale_cached_position = true
+                self:log("XRayPlugin: Ignoring stale last_fetch_page=" .. tostring(first_missing_page)
+                    .. " beyond analysis boundary=" .. tostring(end_page_analysis))
+                first_missing_page = nil
+            end
+
+            local samples, chapter_titles = self.chapter_analyzer:getDetailedChapterSamples(
+                self.ui, 200, 150000, reading_percent == 100, first_missing_page, known_chapters, current_page)
             local annots = self.chapter_analyzer:getAnnotationsForAnalysis(self.ui)
 
             if (not book_text or #book_text < 10) and not samples then
                 if wait_msg then UIManager:close(wait_msg) end
-                if not is_silent then UIManager:show(InfoMessage:new{ text = self.loc:t("error_extract_text") or "Error: Could not extract book text.", timeout = 5 }) end
+                local message = self.loc:t("error_extract_text") or "Error: Could not extract book text."
+                if is_update and stale_cached_position then
+                    local translated = self.loc:t("no_new_text")
+                    message = (translated and translated ~= "no_new_text") and translated
+                        or "No new text was available at your current position; X-Ray is already up to date here."
+                end
+                if not is_silent then UIManager:show(InfoMessage:new{ text = message, timeout = 5 }) end
                 self:log("XRayPlugin: Text extraction failed" .. (is_silent and " (silent)" or ""))
                 clearFetchState()
                 return

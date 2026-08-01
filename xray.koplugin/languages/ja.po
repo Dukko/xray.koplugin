@@ -329,6 +329,9 @@ msgstr "無効なAPIキー"
 msgid "error_extract_text"
 msgstr "エラー：書籍テキストを抽出できませんでした。"
 
+msgid "no_new_text"
+msgstr "現在の位置には新しいテキストがありません。ここではX-Rayはすでに最新です。"
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "お使いのAPIキーは選択したモデルにアクセスできません。別のモデルまたはプロバイダーの使用が必要な場合があります。"
@@ -1384,4 +1387,3 @@ msgstr "辞書および選択メニューに「X-Ray」ボタンを追加し、�
 # en-hash: 93cba07454f06a4a960172bbd6e2a435
 msgid "yes"
 msgstr "はい"
-

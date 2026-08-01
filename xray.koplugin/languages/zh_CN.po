@@ -329,6 +329,9 @@ msgstr "API Key 无效"
 msgid "error_extract_text"
 msgstr "错误：无法提取书籍文本。"
 
+msgid "no_new_text"
+msgstr "当前位置没有可用的新文本；X-Ray 在这里已经是最新的。"
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "您的 API Key 没有访问所选模型的权限。您可能需要使用其他模型或提供商。"

@@ -329,6 +329,9 @@ msgstr "Ongeldige API-sleutel"
 msgid "error_extract_text"
 msgstr "Fout: Kan boektekst niet extraheren."
 
+msgid "no_new_text"
+msgstr "Er was geen nieuwe tekst beschikbaar op je huidige positie; X-Ray is hier al bijgewerkt."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "Uw API-sleutel heeft geen toegang tot het geselecteerde model. U moet mogelijk een ander model of andere provider gebruiken."

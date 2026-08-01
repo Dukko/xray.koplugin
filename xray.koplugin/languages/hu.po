@@ -329,6 +329,9 @@ msgstr "Érvénytelen API kulcs"
 msgid "error_extract_text"
 msgstr "Hiba: Nem sikerült kinyerni a könyv szövegét."
 
+msgid "no_new_text"
+msgstr "A jelenlegi pozíciódnál nem volt új szöveg; az X-Ray itt már naprakész."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "Az API kulcsának nincs hozzáférése a kiválasztott modellhez. Lehet, hogy másik modellt vagy szolgáltatót kell használnia."

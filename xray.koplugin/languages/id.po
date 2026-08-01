@@ -329,6 +329,9 @@ msgstr "Kunci API Tidak Valid"
 msgid "error_extract_text"
 msgstr "Kesalahan: Tidak dapat mengekstrak teks buku."
 
+msgid "no_new_text"
+msgstr "Tidak ada teks baru pada posisi Anda saat ini; X-Ray sudah diperbarui di sini."
+
 # en-hash: 0f09bc754e4c901533fa9bcdb6e41926
 msgid "error_model_access_desc"
 msgstr "Kunci API Anda tidak memiliki akses ke model yang dipilih. Anda mungkin perlu menggunakan model atau penyedia yang berbeda."
