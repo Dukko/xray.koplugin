@@ -1019,6 +1019,11 @@ function M:finalizeXRayData(final_book_data, title, author, book_text, is_update
 end
 
 function M:runPostFetchDuplicateCheck(title, author, reading_percent, is_silent)
+    if self.destroyed then return end
+    if not self.ui or not self.ui.document or not self.ui.getCurrentPage then
+        self:log("XRayPlugin: Skipping duplicate check because the reader document is unavailable")
+        return
+    end
     if self._unit_scan_in_progress then
         self:log("XRayPlugin: Deferring duplicate check because unit scan is in progress")
         UIManager:scheduleIn(5, function()

@@ -18,6 +18,60 @@ describe("xray_fetch", function()
         }
     end)
 
+    describe("runPostFetchDuplicateCheck reader state", function()
+        it("skips safely when the reader document is unavailable", function()
+            local analyzer_called = false
+            plugin.ui.document = nil
+            plugin.ai_helper.hasApiKey = function() return true end
+            plugin.chapter_analyzer = {
+                getTextForAnalysis = function()
+                    analyzer_called = true
+                    return "text"
+                end,
+            }
+
+            local ok, err = pcall(function()
+                plugin:runPostFetchDuplicateCheck("Title", "Author", 50, true)
+            end)
+
+            assert.is_true(ok)
+            assert.is_nil(err)
+            assert.is_false(analyzer_called)
+        end)
+
+        it("continues when the reader document is available", function()
+            local analyzer_called = false
+            plugin.ui.getCurrentPage = function() return 10 end
+            plugin.ai_helper.hasApiKey = function() return true end
+            plugin.chapter_analyzer = {
+                getTextForAnalysis = function(_, ui, limit, _, current_page)
+                    analyzer_called = ui == plugin.ui and limit == 15000 and current_page == 10
+                    return "text"
+                end,
+            }
+
+            plugin:runPostFetchDuplicateCheck("Title", "Author", 50, true)
+
+            assert.is_true(analyzer_called)
+        end)
+
+        it("skips safely when the plugin is destroyed", function()
+            local analyzer_called = false
+            plugin.destroyed = true
+            plugin.ai_helper.hasApiKey = function() return true end
+            plugin.chapter_analyzer = {
+                getTextForAnalysis = function()
+                    analyzer_called = true
+                    return "text"
+                end,
+            }
+
+            plugin:runPostFetchDuplicateCheck("Title", "Author", 50, true)
+
+            assert.is_false(analyzer_called)
+        end)
+    end)
+
     describe("continueWithFetch cancellation", function()
         it("cancels the owned child and allows a new fetch before the old poll runs", function()
             local UIManager = require("ui/uimanager")
@@ -39,6 +93,7 @@ describe("xray_fetch", function()
 
             plugin.ui.getCurrentPage = function() return 10 end
             plugin.chapter_analyzer = {
+                getEndPageForCurrentPage = function(_, _, current_page) return current_page end,
                 getTextForAnalysis = function() return "enough extracted book text" end,
                 getDetailedChapterSamples = function() return "chapter samples", { "Chapter 1" } end,
                 getAnnotationsForAnalysis = function() return nil end,
@@ -290,4 +345,3 @@ describe("xray_fetch", function()
         end)
     end)
 end)
-
