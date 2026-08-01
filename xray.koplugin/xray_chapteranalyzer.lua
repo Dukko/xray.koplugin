@@ -25,6 +25,37 @@ end
 
 local ChapterAnalyzer = {}
 
+-- Keep byte budgets, but never return a partial UTF-8 code point.
+local function utf8_sub(s, first, last)
+    if not s or s == "" then return s or "" end
+    local len = #s
+    first = first or 1
+    last = last or len
+    if first < 0 then first = len + first + 1 end
+    if last < 0 then last = len + last + 1 end
+    first = math.max(1, first)
+    last = math.min(len, last)
+    if first > last then return "" end
+
+    -- Scan complete code points from the beginning. This handles a requested
+    -- start inside a character and an end inside a character without relying
+    -- on any particular byte alignment.
+    local out, i = {}, 1
+    while i <= len do
+        local lead = s:byte(i)
+        local width = (lead < 0x80 and 1) or (lead < 0xE0 and 2)
+            or (lead < 0xF0 and 3) or (lead < 0xF5 and 4) or 1
+        local finish = i + width - 1
+        if i >= first and finish <= last then
+            out[#out + 1] = s:sub(i, finish)
+        end
+        i = finish + 1
+    end
+    return table.concat(out)
+end
+
+ChapterAnalyzer.utf8_sub = utf8_sub
+
 function ChapterAnalyzer:new(o)
     o = o or {}
     setmetatable(o, self)
@@ -188,7 +219,7 @@ function ChapterAnalyzer:getVisibleTextReflowable(ui)
             logger.info("ChapterAnalyzer: Got text from getFullText")
             -- Limit size
             if #result > 100000 then
-                result = string.sub(result, 1, 100000)
+                result = utf8_sub(result, 1, 100000)
             end
             return result
         end
@@ -463,7 +494,7 @@ function ChapterAnalyzer:getTextFromPageRange(ui, start_page, end_page, max_len)
             end
             text = text .. page_text .. "\n"
             if #text >= max_len then
-                return text:sub(1, max_len)
+                return utf8_sub(text, 1, max_len)
             end
         end
         return #text > 0 and text or nil
@@ -820,10 +851,10 @@ function ChapterAnalyzer:getDetailedChapterSamples(ui, max_chapters, total_limit
             end)
             
             if success and chapter_text and #chapter_text > 100 then
-                local start_txt = chapter_text:sub(1, sample_len)
+                local start_txt = utf8_sub(chapter_text, 1, sample_len)
                 local mid_start = math.max(1, math.floor(#chapter_text / 2) - math.floor(sample_len / 2))
-                local mid_txt = chapter_text:sub(mid_start, mid_start + sample_len)
-                local end_txt = chapter_text:sub(-sample_len)
+                local mid_txt = utf8_sub(chapter_text, mid_start, mid_start + sample_len)
+                local end_txt = utf8_sub(chapter_text, -sample_len, -1)
                 
                 table.insert(samples, string.format(
                     "CHAPTER [%s]:\n[START]: %s\n[MID]: %s\n[END]: %s",
@@ -855,7 +886,7 @@ function ChapterAnalyzer:getDetailedChapterSamples(ui, max_chapters, total_limit
                 if success and section_text and #section_text > 100 then
                     table.insert(samples, string.format(
                         "SECTION [%d] (Near Page %d):\n%s",
-                        i, p, section_text:sub(1, per_chapter_budget)
+                        i, p, utf8_sub(section_text, 1, per_chapter_budget)
                     ))
                     table.insert(chapter_titles, "Section " .. i)
                 end

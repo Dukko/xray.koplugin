@@ -1,8 +1,25 @@
 -- xray_chapteranalyzer_spec.lua
 require("spec.spec_helper")
 local analyzer = require("xray_chapteranalyzer")
+local AIHelper = require("xray_aihelper")
 
 describe("xray_chapteranalyzer", function()
+    describe("utf8_sub", function()
+        it("preserves Chinese characters at byte boundaries", function()
+            local text = string.char(0xE7,0x94,0xB2, 0xE4,0xB9,0x99, 0xE4,0xB8,0x99, 0xE4,0xB8,0x81)
+            for offset = 1, #text do
+                local result = analyzer.utf8_sub(text, 1, offset)
+                assert.are.equal(result, AIHelper:sanitize_utf8(result))
+            end
+        end)
+
+        it("does not begin or end with UTF-8 continuation bytes", function()
+            local text = string.char(0xE8,0xAF,0xA1,0xE7,0xA7,0x98,0xE4,0xB9,0x8B,0xE4,0xB8,0xBB,0xEF,0xBC,0x8C,0xE6,0xB8,0xB8,0xE6,0x88,0x8F,0xE5,0x85,0xA5,0xE4,0xBE,0xB5)
+            local result = analyzer.utf8_sub(text, 2, #text - 2)
+            assert.are.equal(result, AIHelper:sanitize_utf8(result))
+        end)
+    end)
+
     describe("getEndPageForCurrentPage", function()
         it("uses the next page as the end XPointer for reflowable documents", function()
             local ui = { rolling = {} }

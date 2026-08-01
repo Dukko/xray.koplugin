@@ -107,11 +107,10 @@ function Run-Workflow {
     # 4. Restart KOReader
     Write-Host "Restarting KOReader..." -ForegroundColor Cyan
     wsl pkill -9 -f koreader 2>$null
-    wsl pkill -9 -f AppRun 2>$null
     Start-Sleep -Seconds 1
 
     # Define start command
-    $DefaultCmd = "C:\Windows\System32\wsl.exe --exec dbus-launch --exit-with-session bash -c `"cd $SquashPath && ./launch_with_log.sh`""
+    $DefaultCmd = "C:\Windows\System32\wsl.exe --exec dbus-launch --exit-with-session bash -c `"/usr/bin/koreader`""
     $StartCmd = if ($env:KOREADER_START_CMD) { $env:KOREADER_START_CMD } else { $DefaultCmd }
     
     Write-Host "Starting KOReader: $StartCmd"
