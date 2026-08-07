@@ -18,6 +18,151 @@ describe("xray_fetch", function()
         }
     end)
 
+    describe("runPostFetchDuplicateCheck reader state", function()
+        it("skips safely when the reader document is unavailable", function()
+            local analyzer_called = false
+            plugin.ui.document = nil
+            plugin.ai_helper.hasApiKey = function() return true end
+            plugin.chapter_analyzer = {
+                getTextForAnalysis = function()
+                    analyzer_called = true
+                    return "text"
+                end,
+            }
+
+            local ok, err = pcall(function()
+                plugin:runPostFetchDuplicateCheck("Title", "Author", 50, true)
+            end)
+
+            assert.is_true(ok)
+            assert.is_nil(err)
+            assert.is_false(analyzer_called)
+        end)
+
+        it("continues when the reader document is available", function()
+            local analyzer_called = false
+            plugin.ui.getCurrentPage = function() return 10 end
+            plugin.ai_helper.hasApiKey = function() return true end
+            plugin.chapter_analyzer = {
+                getTextForAnalysis = function(_, ui, limit, _, current_page)
+                    analyzer_called = ui == plugin.ui and limit == 15000 and current_page == 10
+                    return "text"
+                end,
+            }
+
+            plugin:runPostFetchDuplicateCheck("Title", "Author", 50, true)
+
+            assert.is_true(analyzer_called)
+        end)
+
+        it("skips safely when the plugin is destroyed", function()
+            local analyzer_called = false
+            plugin.destroyed = true
+            plugin.ai_helper.hasApiKey = function() return true end
+            plugin.chapter_analyzer = {
+                getTextForAnalysis = function()
+                    analyzer_called = true
+                    return "text"
+                end,
+            }
+
+            plugin:runPostFetchDuplicateCheck("Title", "Author", 50, true)
+
+            assert.is_false(analyzer_called)
+        end)
+    end)
+
+    describe("continueWithFetch cancellation", function()
+        it("cancels the owned child and allows a new fetch before the old poll runs", function()
+            local UIManager = require("ui/uimanager")
+            local old_schedule = UIManager.scheduleIn
+            local old_remove = os.remove
+            local scheduled = {}
+            local removed_files = {}
+            local started_pids = { 501, 502 }
+            local start_count = 0
+            local cancelled_pids = {}
+
+            UIManager.scheduleIn = function(self, delay, callback)
+                table.insert(scheduled, callback)
+            end
+            os.remove = function(path)
+                table.insert(removed_files, path)
+                return true
+            end
+
+            plugin.ui.getCurrentPage = function() return 10 end
+            plugin.chapter_analyzer = {
+                getEndPageForCurrentPage = function(_, _, current_page) return current_page end,
+                getTextForAnalysis = function() return "enough extracted book text" end,
+                getDetailedChapterSamples = function() return "chapter samples", { "Chapter 1" } end,
+                getAnnotationsForAnalysis = function() return nil end,
+            }
+            plugin.ai_helper = {
+                settings = { spoiler_setting = "spoiler_free" },
+                buildComprehensiveRequest = function()
+                    return { { url = "https://example.invalid" } }
+                end,
+                makeRequestAsync = function(self)
+                    start_count = start_count + 1
+                    self._async_child_pid = started_pids[start_count]
+                    return self._async_child_pid
+                end,
+                cancelAsyncChild = function(self, expected_pid)
+                    table.insert(cancelled_pids, expected_pid)
+                    if self._async_child_pid ~= expected_pid then return false end
+                    self._async_child_pid = nil
+                    return true
+                end,
+                checkAsyncResult = function() return nil end,
+            }
+
+            local function runNext()
+                local callback = table.remove(scheduled, 1)
+                assert.is_not_nil(callback)
+                callback()
+            end
+
+            local ok, err = pcall(function()
+                plugin:continueWithFetch(50)
+                local first_dialog = _G.ui_tracker.last_shown
+                runNext() -- deferred extraction
+                runNext() -- request construction and start
+
+                assert.are.equal(501, plugin.ai_helper._async_child_pid)
+                assert.is_true(plugin.bg_fetch_active)
+
+                first_dialog.args.buttons[1][1].callback()
+                assert.are.equal(501, cancelled_pids[1])
+                assert.is_false(plugin.bg_fetch_active)
+                assert.is_true(#removed_files > 0)
+
+                -- Start again before the cancelled fetch's queued poll runs.
+                plugin:continueWithFetch(50)
+                local second_dialog = _G.ui_tracker.last_shown
+                assert.is_true(plugin.bg_fetch_active)
+
+                runNext() -- stale poll from the cancelled fetch
+                assert.is_true(plugin.bg_fetch_active)
+                assert.are.equal(1, #cancelled_pids)
+
+                runNext() -- second fetch extraction
+                runNext() -- second request start
+                assert.are.equal(2, start_count)
+                assert.are.equal(502, plugin.ai_helper._async_child_pid)
+                assert.is_true(plugin.bg_fetch_active)
+
+                second_dialog.args.buttons[1][1].callback()
+                assert.are.equal(502, cancelled_pids[2])
+                assert.is_false(plugin.bg_fetch_active)
+            end)
+
+            UIManager.scheduleIn = old_schedule
+            os.remove = old_remove
+            if not ok then error(err) end
+        end)
+    end)
+
     describe("finalizeXRayData", function()
         it("merges new characters correctly in update mode", function()
             plugin.characters = {
@@ -200,5 +345,3 @@ describe("xray_fetch", function()
         end)
     end)
 end)
-
-

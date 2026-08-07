@@ -5,6 +5,29 @@ local ok_ltn12, ltn12 = pcall(require, "ltn12")
 local ok_socket, socket = pcall(require, "socket")
 local ok_socketutil, socketutil = pcall(require, "socketutil")
 
+local process_ffi
+do
+    local ok_ffi, ffi = pcall(require, "ffi")
+    if ok_ffi then
+        pcall(function()
+            ffi.cdef[[
+                int close(int fd);
+                int fork(void);
+                int kill(int pid, int sig);
+                int waitpid(int pid, int *status, int options);
+                void _exit(int status);
+            ]]
+        end)
+        process_ffi = ffi
+    end
+end
+
+local SIGKILL = 9
+local WNOHANG = 1
+local REAP_INITIAL_DELAY = 0.1
+local REAP_MAX_DELAY = 1
+local REAP_MAX_ATTEMPTS = 10
+
 local logger = require("logger")
 local plugin_path = ((...) or ""):match("(.-)[^%.]+$") or ""
 local XRayLogger = require(plugin_path .. "xray_logger")
@@ -238,7 +261,7 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
     for _, ai in ipairs({ primary, secondary }) do
         local config = self.providers[ai.provider]
         if config and config.api_key and config.api_key ~= "" then
-            local url, headers, body
+            local url, headers, body, stream_format
             local resolved_model = self:resolveModel(ai.provider, ai.model)
             if ai.provider == "gemini" then
                 local model = resolved_model or DEFAULT_AI.primary.model
@@ -306,11 +329,11 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                     headers["Authorization"] = "Bearer " .. config.api_key
                 end
                 
-                if ai.provider == "custom1" or ai.provider == "custom2" then
-                    if (config.endpoint or ""):find("openrouter.ai") then
-                        headers["HTTP-Referer"]      = "https://github.com/koreader/koreader-xray-plugin"
-                        headers["X-Title"] = "KOReader X-Ray"
-                    end
+                local is_openrouter = (ai.provider == "custom1" or ai.provider == "custom2")
+                    and (config.endpoint or ""):find("openrouter.ai", 1, true)
+                if is_openrouter then
+                    headers["HTTP-Referer"] = "https://github.com/koreader/koreader-xray-plugin"
+                    headers["X-Title"] = "KOReader X-Ray"
                 end
                 
                 local system_instruction_text = (self.prompts and self.prompts.system_instruction or "Return valid JSON ONLY.") .. " You MUST output strictly valid JSON, starting with '{'."
@@ -351,6 +374,11 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                 local is_reasoning = self.settings and self.settings[ai.provider .. "_is_reasoning"]
                 if is_reasoning then
                     req_body.max_tokens = 32000
+                end
+                if is_openrouter then
+                    req_body.stream = true
+                    headers["Accept"] = "text/event-stream"
+                    stream_format = "anthropic"
                 end
                 
                 body = json.encode(req_body)
@@ -412,9 +440,12 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                 end
                 
                 if ai.provider == "custom1" or ai.provider == "custom2" then
-                    if (config.endpoint or ""):find("openrouter.ai") then
+                    if (config.endpoint or ""):find("openrouter.ai", 1, true) then
                         headers["HTTP-Referer"]      = "https://github.com/koreader/koreader-xray-plugin"
                         headers["X-Title"] = "KOReader X-Ray"
+                        headers["Accept"] = "text/event-stream"
+                        req_body.stream = true
+                        stream_format = "openai"
                     end
                     -- Per-slot "Is Reasoning Model" setting: raise token ceiling to accommodate reasoning chains
                     local is_reasoning = self.settings and self.settings[ai.provider .. "_is_reasoning"]
@@ -426,7 +457,14 @@ function AIHelper:buildComprehensiveRequest(title, author, context, prompt_overr
                 
                 body = json.encode(req_body)
             end
-            table.insert(requests, { url = url, headers = headers, body = body, provider = ai.provider, model = resolved_model or ai.model })
+            table.insert(requests, {
+                url = url,
+                headers = headers,
+                body = body,
+                provider = ai.provider,
+                model = resolved_model or ai.model,
+                stream_format = stream_format,
+            })
         end
     end
     
@@ -447,12 +485,203 @@ function AIHelper:hasApiKey()
     return false
 end
 
+local function getFFIUtil()
+    local ok, ffiutil = pcall(require, "ffi/util")
+    if not ok then
+        ok, ffiutil = pcall(require, "ffiutil")
+    end
+    return ok and ffiutil or nil
+end
+
+function AIHelper:_clearAsyncChildState(pid)
+    if self._async_child_pid == pid then
+        self._async_child_pid = nil
+        self._async_child_uses_process_group = nil
+        self._async_result_file = nil
+    end
+end
+
+function AIHelper:_isAsyncChildDone(pid)
+    local ffiutil = getFFIUtil()
+    if ffiutil and ffiutil.isSubProcessDone then
+        local ok, done = pcall(ffiutil.isSubProcessDone, pid)
+        if ok then return done == true end
+    end
+
+    if not process_ffi then return false end
+    local ok, done = pcall(function()
+        local result = process_ffi.C.waitpid(pid, nil, WNOHANG)
+        return result == pid or result == -1
+    end)
+    return ok and done == true
+end
+
+-- Reap a completed child without touching a newer request that may have
+-- replaced it.
+function AIHelper:_reapAsyncChild(pid)
+    if not pid or self._async_child_pid ~= pid then return false end
+
+    if self:_isAsyncChildDone(pid) then
+        self:_clearAsyncChildState(pid)
+        return true
+    end
+    return false
+end
+
+function AIHelper:_terminateAsyncProcess(pid, use_process_group)
+    if not process_ffi then return false end
+    local ok, termination_requested = pcall(function()
+        local group_killed = false
+        if use_process_group then
+            group_killed = process_ffi.C.kill(-pid, SIGKILL) == 0
+        end
+        local child_killed = process_ffi.C.kill(pid, SIGKILL) == 0
+        return group_killed or child_killed
+    end)
+    return ok and termination_requested == true
+end
+
+function AIHelper:_scheduleAsyncChildReap(pid)
+    self._async_children_to_reap = self._async_children_to_reap or {}
+    if self._async_children_to_reap[pid] then return true end
+    self._async_children_to_reap[pid] = true
+
+    local ok, UIManager = pcall(require, "ui/uimanager")
+    if not ok or not UIManager or not UIManager.scheduleIn then
+        self._async_children_to_reap[pid] = nil
+        return false
+    end
+
+    local attempts = 0
+    local delay = REAP_INITIAL_DELAY
+    local function stopTracking()
+        local pending = self._async_children_to_reap
+        if not pending then return end
+        pending[pid] = nil
+        if not next(pending) then
+            self._async_children_to_reap = nil
+        end
+    end
+
+    local collect
+    collect = function()
+        attempts = attempts + 1
+        if self:_isAsyncChildDone(pid) then
+            stopTracking()
+            self:log("AIHelper: Collected async child process PID " .. tostring(pid))
+        elseif attempts >= REAP_MAX_ATTEMPTS then
+            stopTracking()
+            self:log("AIHelper: Timed out waiting to collect async child PID " .. tostring(pid))
+        else
+            delay = math.min(delay * 2, REAP_MAX_DELAY)
+            UIManager:scheduleIn(delay, collect)
+        end
+    end
+    UIManager:scheduleIn(delay, collect)
+    return true
+end
+
+function AIHelper:normalizeOpenRouterStream(response_text, stream_format)
+    if stream_format ~= "openai" and stream_format ~= "anthropic" then
+        return nil, "Unsupported OpenRouter stream format"
+    end
+
+    local content = {}
+    local stream_complete = false
+    local finish_reason = "stop"
+
+    local normalized_stream = (response_text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    for event_block in (normalized_stream .. "\n\n"):gmatch("(.-)\n\n") do
+        local data_lines = {}
+        for line in (event_block .. "\n"):gmatch("(.-)\n") do
+            local data = line:match("^data:(.*)$")
+            if data then
+                local value = data:gsub("^ ", "")
+                table.insert(data_lines, value)
+            end
+        end
+
+        local payload = table.concat(data_lines, "\n")
+        if payload == "[DONE]" then
+            stream_complete = true
+        elseif payload ~= "" then
+            local ok, event = pcall(json.decode, payload)
+            if not ok or type(event) ~= "table" then
+                return nil, "OpenRouter returned malformed stream data"
+            end
+            if event.error then
+                local message = type(event.error) == "table" and event.error.message or event.error
+                return nil, tostring(message or "OpenRouter stream failed")
+            end
+
+            if stream_format == "openai" then
+                local choice = event.choices and event.choices[1]
+                local delta = choice and choice.delta
+                if delta and type(delta.content) == "string" then
+                    table.insert(content, delta.content)
+                end
+                if choice then
+                    if choice.finish_reason == "error" then
+                        return nil, "OpenRouter stream failed"
+                    elseif choice.finish_reason == "stop" or choice.finish_reason == "length" then
+                        finish_reason = choice.finish_reason
+                        stream_complete = true
+                    end
+                end
+            else
+                if event.type == "content_block_start"
+                    and event.content_block
+                    and type(event.content_block.text) == "string" then
+                    table.insert(content, event.content_block.text)
+                elseif event.type == "content_block_delta"
+                    and event.delta
+                    and event.delta.type == "text_delta"
+                    and type(event.delta.text) == "string" then
+                    table.insert(content, event.delta.text)
+                elseif event.type == "message_stop" then
+                    stream_complete = true
+                elseif event.type == "error" then
+                    return nil, "OpenRouter stream failed"
+                end
+            end
+        end
+    end
+
+    if not stream_complete then
+        return nil, "OpenRouter stream ended before completion"
+    end
+
+    local text = table.concat(content)
+    if text == "" then
+        return nil, "OpenRouter stream returned no text"
+    end
+
+    if stream_format == "anthropic" then
+        return json.encode({
+            content = {{ type = "text", text = text }},
+        })
+    end
+    return json.encode({
+        choices = {{
+            finish_reason = finish_reason,
+            message = { role = "assistant", content = text },
+        }},
+    })
+end
+
 -- Fork a child process to perform the HTTP request. Returns true if started.
 function AIHelper:makeRequestAsync(request_params, result_file)
-    local ok_ffi, ffiutil = pcall(require, "ffi/util")
-    if not ok_ffi then
-        ok_ffi, ffiutil = pcall(require, "ffiutil")
+    if self._async_child_pid and not self:_reapAsyncChild(self._async_child_pid) then
+        self:log("AIHelper: Cannot start async request while PID " .. tostring(self._async_child_pid) .. " is still active")
+        return false
     end
+
+    if result_file then
+        pcall(function() os.remove(result_file) end)
+    end
+
+    local ffiutil = getFFIUtil()
+    local ok_ffi = ffiutil ~= nil
     
     local function child_logic(pid, write_fd)
         local child_ok, child_err = pcall(function()
@@ -506,6 +735,19 @@ function AIHelper:makeRequestAsync(request_params, result_file)
                             "AIHelper Child: Incomplete response from %s — got %d bytes, expected %d. Treating as failure.",
                             req.provider, #response_text, clen))
                         code_num = nil -- prevents falling into the code_num==200 block below
+                    end
+                end
+
+                if code_num == 200 and req.stream_format then
+                    local normalized, stream_error = self:normalizeOpenRouterStream(response_text, req.stream_format)
+                    if normalized then
+                        response_text = normalized
+                    else
+                        code = 502
+                        code_num = 502
+                        response_text = json.encode({
+                            error = { message = stream_error },
+                        })
                     end
                 end
 
@@ -686,20 +928,16 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         end
 
         -- Close write_fd if provided by runInSubProcess
-        if write_fd and write_fd > 0 then
-            pcall(function() 
-                local ffi = require("ffi")
-                ffi.cdef[[ int close(int fd); ]]
-                ffi.C.close(write_fd) 
+        if process_ffi and write_fd and write_fd > 0 then
+            pcall(function()
+                process_ffi.C.close(write_fd)
             end)
         end
 
         -- Exit child cleanly
-        local ffi_ok, ffi = pcall(require, "ffi")
-        if ffi_ok then
+        if process_ffi then
             pcall(function()
-                ffi.cdef[[ void _exit(int status); ]]
-                ffi.C._exit(0)
+                process_ffi.C._exit(0)
             end)
         end
         local posix_ok, posix = pcall(require, "posix.unistd")
@@ -717,14 +955,14 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         if pid and pid > 0 then
             self:log("AIHelper: runInSubProcess started PID " .. tostring(pid))
             -- We don't need the pipe for now as we use the result_file
-            if read_fd and read_fd > 0 then
-                pcall(function() 
-                    local ffi = require("ffi")
-                    ffi.cdef[[ int close(int fd); ]]
-                    ffi.C.close(read_fd) 
+            if process_ffi and read_fd and read_fd > 0 then
+                pcall(function()
+                    process_ffi.C.close(read_fd)
                 end)
             end
             self._async_child_pid = pid
+            self._async_child_uses_process_group = true
+            self._async_result_file = result_file
             return pid
         end
     end
@@ -738,14 +976,10 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         if not ok_posix then ok_posix, posix = pcall(require, "posix") end
         if ok_posix and posix and posix.fork then
             fork = posix.fork
-        else
-            local ok_f, ffi = pcall(require, "ffi")
-            if ok_f then
-                pcall(function()
-                    ffi.cdef[[ int fork(void); ]]
-                    fork = ffi.C.fork
-                end)
-            end
+        elseif process_ffi then
+            pcall(function()
+                fork = process_ffi.C.fork
+            end)
         end
     end
     
@@ -757,6 +991,8 @@ function AIHelper:makeRequestAsync(request_params, result_file)
         elseif pid and pid > 0 then
             self:log("AIHelper: Manual fork started PID " .. tostring(pid))
             self._async_child_pid = pid
+            self._async_child_uses_process_group = false
+            self._async_result_file = result_file
             return pid
         end
     end
@@ -769,7 +1005,16 @@ end
 --   nil (still pending)
 --   book_data table (success)
 --   false, error_code, error_msg (failed)
-function AIHelper:checkAsyncResult(result_file)
+function AIHelper:checkAsyncResult(result_file, expected_pid)
+    if expected_pid then
+        local owns_expected_request = self._async_child_pid == expected_pid
+            and self._async_result_file == result_file
+        if not owns_expected_request then
+            self:log("AIHelper: Ignoring stale async result poll for PID " .. tostring(expected_pid))
+            return false, "error_stale", "Async result belongs to a different request"
+        end
+    end
+
     local f = io.open(result_file, "r")
     if not f then return nil end  -- still pending
 
@@ -777,13 +1022,17 @@ function AIHelper:checkAsyncResult(result_file)
     f:close()
     os.remove(result_file)
 
-    -- Reap child process to prevent zombies
-    if self._async_child_pid then
-        pcall(function()
-            local posix_sys = require("posix.sys.wait")
-            posix_sys.wait(self._async_child_pid, posix_sys.WNOHANG)
-        end)
-        self._async_child_pid = nil
+    -- Reap only the child that owns this result. A stale poll from an older
+    -- request must never clear the PID of a newer request.
+    local tracked_pid = self._async_child_pid
+    local owns_result = not self._async_result_file or self._async_result_file == result_file
+    if tracked_pid and owns_result and (not expected_pid or expected_pid == tracked_pid) then
+        if not self:_reapAsyncChild(tracked_pid) then
+            self:_clearAsyncChildState(tracked_pid)
+            if not self:_scheduleAsyncChildReap(tracked_pid) then
+                self:log("AIHelper: Could not schedule collection of completed child PID " .. tostring(tracked_pid))
+            end
+        end
     end
 
     -- Parse: first line = code, second line = provider, rest = response body
@@ -859,24 +1108,37 @@ function AIHelper:checkAsyncResult(result_file)
     end
 end
 
-function AIHelper:cancelAsyncChild()
-    if self._async_child_pid then
-        self:log("AIHelper: Cancelling async child process PID " .. tostring(self._async_child_pid))
-        pcall(function()
-            local ffi = require("ffi")
-            ffi.cdef[[
-                int kill(int pid, int sig);
-                int waitpid(int pid, int *status, int options);
-            ]]
-            ffi.C.kill(self._async_child_pid, 9) -- SIGKILL
-            ffi.C.waitpid(self._async_child_pid, nil, 1) -- WNOHANG = 1
-        end)
-        pcall(function()
-            local posix_sys = require("posix.sys.wait")
-            posix_sys.wait(self._async_child_pid, posix_sys.WNOHANG)
-        end)
-        self._async_child_pid = nil
+function AIHelper:cancelAsyncChild(expected_pid)
+    local pid = self._async_child_pid
+    if not pid then return false end
+    if expected_pid and expected_pid ~= pid then
+        self:log("AIHelper: Refusing to cancel stale PID " .. tostring(expected_pid) .. "; active PID is " .. tostring(pid))
+        return false
     end
+
+    self:log("AIHelper: Cancelling async child process PID " .. tostring(pid))
+    local result_file = self._async_result_file
+    -- Signal the process group without first calling a helper that may reap
+    -- the child. Also signal the PID in case cancellation happens before the
+    -- child creates its process group.
+    local termination_requested = self:_terminateAsyncProcess(
+        pid,
+        self._async_child_uses_process_group
+    )
+
+    if not termination_requested and not self:_reapAsyncChild(pid) then
+        self:log("AIHelper: Failed to terminate async child PID " .. tostring(pid))
+        return false
+    end
+
+    self:_clearAsyncChildState(pid)
+    if result_file then
+        pcall(function() os.remove(result_file) end)
+    end
+    if not self:_isAsyncChildDone(pid) and not self:_scheduleAsyncChildReap(pid) then
+        self:log("AIHelper: Could not schedule collection of cancelled child PID " .. tostring(pid))
+    end
+    return true
 end
 
 function AIHelper:init(path)
