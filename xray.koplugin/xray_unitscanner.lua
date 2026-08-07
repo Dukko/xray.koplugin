@@ -420,7 +420,7 @@ function M:_drawUnitUnderlines(bb)
         else
             if not self.unit_xp_matches then
                 local cache_loaded = self:loadUnitCache()
-                if not cache_loaded then
+                if not cache_loaded and settings.unit_auto_scan_enabled ~= false then
                     self:scanBookForUnits()
                 end
             end
@@ -628,6 +628,11 @@ function M:scanBookForUnits(force)
     local settings = self.ai_helper and self.ai_helper.settings or {}
     if settings.unit_converter_enabled == false or settings.unit_underline_enabled == false then
         self:clearUnitUnderlines()
+        return
+    end
+
+    if not force and settings.unit_auto_scan_enabled == false then
+        log("scanBookForUnits: skipped scan because unit_auto_scan_enabled is false.")
         return
     end
 

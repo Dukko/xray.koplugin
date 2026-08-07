@@ -334,10 +334,6 @@ function XRayPlugin:onReaderReady()
                     else
                         self:scanBookForUnits()
                     end
-                else
-                    if self.triggerBookTypeDetection then
-                        self:triggerBookTypeDetection()
-                    end
                 end
             end
         end
