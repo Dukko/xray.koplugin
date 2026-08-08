@@ -261,22 +261,20 @@ function M:_drawEntityUnderlines(bb)
         self._entity_box_cache_sig = nil
     elseif redraw_needed then
         self._entity_box_cache_sig = nil
+
+        local settings = self.ai_helper and self.ai_helper.settings or {}
+        if settings.entity_footnotes_enabled == false then
+            self:clearEntityUnderlines()
+        elseif not self.entity_xp_matches then
+            local cache_loaded = self:loadEntityCache()
+            if not cache_loaded then
+                self:scanBookForEntities()
+            end
+        end
     end
 
     local settings = self.ai_helper and self.ai_helper.settings or {}
-    if settings.entity_footnotes_enabled == false then
-        if self.entity_boxes and #self.entity_boxes > 0 then
-            self:clearEntityUnderlines()
-        end
-        return
-    end
-
-    if not self.entity_xp_matches then
-        local cache_loaded = self:loadEntityCache()
-        if not cache_loaded then
-            self:scanBookForEntities()
-        end
-    end
+    if settings.entity_footnotes_enabled == false then return end
 
     self:_resolveEntityHighlightBoxes()
     if not self.entity_boxes or #self.entity_boxes == 0 then return end
@@ -452,8 +450,14 @@ function M:scanBookForEntities(force)
 
     local terms, lookup = _collectEntityTerms(self, settings)
     if #terms == 0 then
+        -- Mark as "scanned, nothing to show" (not nil) so the paint-time check in
+        -- _drawEntityUnderlines doesn't treat this as "never scanned" and rescan every repaint.
         self.entity_xp_matches = {}
-        self:clearEntityUnderlines()
+        self.entity_boxes = {}
+        self._entity_box_cache_sig = nil
+        if self.ui and self.ui.view and self.ui.view.dialog then
+            UIManager:setDirty(self.ui.view.dialog, "ui")
+        end
         return
     end
 
