@@ -215,14 +215,41 @@ msgstr "Very Detailed"
 msgid "dont_ask_again"
 msgstr "Don't ask again"
 
+msgid "entity_cat_characters"
+msgstr "Characters"
+
+msgid "entity_cat_historical_figures"
+msgstr "Historical Figures"
+
+msgid "entity_cat_locations"
+msgstr "Locations"
+
+msgid "entity_cat_terms"
+msgstr "Terms"
+
+msgid "entity_footnotes_enabled"
+msgstr "Enable Entity Footnotes"
+
 msgid "entity_label_characters"
 msgstr "characters"
 
 msgid "entity_label_locations"
 msgstr "locations"
 
+msgid "entity_manual_scan_button"
+msgstr "Scan/Rescan"
+
+msgid "entity_no_description"
+msgstr "No description available yet."
+
 msgid "entity_not_found"
 msgstr "'%s' was not found as a character or location."
+
+msgid "entity_scanning_book"
+msgstr "Scanning book for footnotes..."
+
+msgid "entity_style_settings"
+msgstr "Style & Underline Settings"
 
 msgid "entity_ui_style_both"
 msgstr "Modern Popup (Both)"
@@ -490,6 +517,12 @@ msgstr "Display & UI Settings"
 
 msgid "menu_enter_custom_model"
 msgstr "Enter custom model..."
+
+msgid "menu_entity_categories"
+msgstr "Entity Categories"
+
+msgid "menu_entity_footnotes"
+msgstr "Entity Footnotes"
 
 msgid "menu_entity_ui_mode"
 msgstr "Entity Description Style"
