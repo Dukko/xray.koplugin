@@ -13,6 +13,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local TextBoxWidget = require("ui/widget/textboxwidget")
+local ProgressBarDialog = require("ui/widget/progressbardialog")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local DocSettings = require("docsettings")
@@ -499,22 +500,64 @@ function M:scanBookForEntities(force)
     local doc = self.ui.document
 
     local Notification = require("ui/widget/notification")
-    UIManager:show(Notification:new{
-        text = self.loc:t("entity_scanning_book") or "Scanning book for footnotes...",
-        timeout = 2,
-        toast = true,
-    })
+    local AlphaContainer = require("ui/widget/container/alphacontainer")
+
+    -- Modal progress dialog (dismissable = false) instead of a passive toast: doc:findAllText
+    -- blocks the UI thread, and without a visible "busy" indicator the app can appear to have
+    -- frozen while it's actually still scanning.
+    local progress_msg = ProgressBarDialog:new{
+        title = self.loc:t("entity_scanning_title") or "X-Ray: Entity Footnotes",
+        subtitle = self.loc:t("entity_scanning_book") or "Scanning book for footnotes...",
+        progress_max = 100,
+        dismissable = false,
+        refresh_time_seconds = 0.05,
+    }
+
+    local sw, sh = Screen:getWidth(), Screen:getHeight()
+    local dim_child = {
+        getSize = function(this)
+            return Geom:new{ w = sw, h = sh }
+        end,
+        paintTo = function(this, bb, x, y)
+            bb:paintRoundedRect(x, y, sw, sh, Blitbuffer.COLOR_BLACK, 0)
+        end
+    }
+    local dim_bg = AlphaContainer:new{
+        alpha = 0.4,
+        dim_child
+    }
+
+    local orig_paintTo = progress_msg.paintTo
+    progress_msg.paintTo = function(this, bb, x, y)
+        dim_bg:paintTo(bb, 0, 0)
+        orig_paintTo(this, bb, x, y)
+    end
+
+    local orig_onCloseWidget = progress_msg.onCloseWidget
+    progress_msg.onCloseWidget = function(this)
+        dim_bg:onCloseWidget()
+        if orig_onCloseWidget then
+            orig_onCloseWidget(this)
+        end
+    end
+
+    progress_msg:show()
+    UIManager:forceRePaint()
 
     UIManager:scheduleIn(0.1, function()
         if self.destroyed then
             self._entity_scan_in_progress = false
+            progress_msg:close()
             return
         end
 
         local ok_scan, err_scan = pcall(function()
+            progress_msg:reportProgress(10)
+
             local patterns = _buildChunks(terms)
             local hits = {}
-            for _, pat in ipairs(patterns) do
+            local total_patterns = math.max(1, #patterns)
+            for i, pat in ipairs(patterns) do
                 local ok1, hits1 = pcall(function()
                     return doc:findAllText(pat, true, 0, 5000, true)
                 end)
@@ -523,7 +566,10 @@ function M:scanBookForEntities(force)
                 else
                     log("scanBookForEntities: findAllText pcall failed (non-fatal): " .. tostring(hits1))
                 end
+                progress_msg:reportProgress(10 + math.floor(70 * i / total_patterns))
             end
+
+            progress_msg:reportProgress(85)
 
             -- Deduplicate overlapping hits by end xpointer, keeping the longest match
             local unique_hits = {}
@@ -552,6 +598,7 @@ function M:scanBookForEntities(force)
             self.entity_xp_matches = xp_matches
             self._entity_box_cache_sig = nil
             log("scanBookForEntities: found " .. tostring(#xp_matches) .. " entity mentions")
+            progress_msg:reportProgress(95)
 
             UIManager:show(Notification:new{
                 text = tostring(#xp_matches) .. " footnotes found",
@@ -573,6 +620,9 @@ function M:scanBookForEntities(force)
         end)
 
         self._entity_scan_in_progress = false
+        progress_msg:reportProgress(100)
+        progress_msg:close()
+
         if not ok_scan then
             log("scanBookForEntities async error: " .. tostring(err_scan))
         end
