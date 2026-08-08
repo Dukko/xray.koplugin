@@ -48,6 +48,7 @@ safeRequireMixin("xray_ui")
 safeRequireMixin("xray_fetch")
 safeRequireMixin("xray_mentions")
 safeRequireMixin("xray_unitscanner")
+safeRequireMixin("xray_entityscanner")
 
 
 function XRayPlugin:init()
@@ -320,7 +321,7 @@ function XRayPlugin:onReaderReady()
         if self.destroyed then return end
         if self.mountUnderlineOverlay then self:mountUnderlineOverlay() end
         if self.mountTapHandler then self:mountTapHandler() end
-        
+
 
         local settings = self.ai_helper and self.ai_helper.settings or {}
         if settings.unit_new_feature_prompt_seen ~= true then
@@ -336,6 +337,12 @@ function XRayPlugin:onReaderReady()
                     end
                 end
             end
+        end
+
+        if self.mountEntityUnderlineOverlay then self:mountEntityUnderlineOverlay() end
+        if self.mountEntityTapHandler then self:mountEntityTapHandler() end
+        if self.scanBookForEntities and settings.entity_footnotes_enabled ~= false then
+            self:scanBookForEntities()
         end
     end)
 
@@ -1084,6 +1091,90 @@ function XRayPlugin:getSubMenuItems()
                                     if self.scanBookForUnits then self:scanBookForUnits() end
                                 end
                             }
+                        }
+                    }
+                },
+                separator = true,
+            },
+            {
+                is_entity_footnotes = true,
+                text = self.loc:t("menu_entity_footnotes") or "Entity Footnotes",
+                keep_menu_open = true,
+                sub_item_table = {
+                    {
+                        text = self.loc:t("entity_footnotes_enabled") or "Enable Entity Footnotes",
+                        checked_func = function()
+                            return self.ai_helper.settings.entity_footnotes_enabled ~= false
+                        end,
+                        callback = function()
+                            local current = self.ai_helper.settings.entity_footnotes_enabled ~= false
+                            self.ai_helper:saveSettings({ entity_footnotes_enabled = not current })
+                            if self.scanBookForEntities then self:scanBookForEntities() end
+                        end
+                    },
+                    {
+                        text = self.loc:t("entity_manual_scan_button") or "Scan/Rescan",
+                        keep_menu_open = true,
+                        callback = function()
+                            if self.scanBookForEntities then self:scanBookForEntities(true) end
+                        end,
+                        separator = true,
+                    },
+                    {
+                        text = self.loc:t("entity_style_settings") or "Style & Underline Settings",
+                        keep_menu_open = true,
+                        callback = function()
+                            self:showUnitStyleCard()
+                        end
+                    },
+                    {
+                        text = self.loc:t("menu_entity_categories") or "Entity Categories",
+                        keep_menu_open = true,
+                        sub_item_table = {
+                            {
+                                text = self.loc:t("entity_cat_characters") or "Characters",
+                                checked_func = function()
+                                    return self.ai_helper.settings.entity_cat_characters ~= false
+                                end,
+                                callback = function()
+                                    local curr = self.ai_helper.settings.entity_cat_characters ~= false
+                                    self.ai_helper:saveSettings({ entity_cat_characters = not curr })
+                                    if self.scanBookForEntities then self:scanBookForEntities(true) end
+                                end
+                            },
+                            {
+                                text = self.loc:t("entity_cat_historical_figures") or "Historical Figures",
+                                checked_func = function()
+                                    return self.ai_helper.settings.entity_cat_historical_figures ~= false
+                                end,
+                                callback = function()
+                                    local curr = self.ai_helper.settings.entity_cat_historical_figures ~= false
+                                    self.ai_helper:saveSettings({ entity_cat_historical_figures = not curr })
+                                    if self.scanBookForEntities then self:scanBookForEntities(true) end
+                                end
+                            },
+                            {
+                                text = self.loc:t("entity_cat_locations") or "Locations",
+                                checked_func = function()
+                                    return self.ai_helper.settings.entity_cat_locations ~= false
+                                end,
+                                callback = function()
+                                    local curr = self.ai_helper.settings.entity_cat_locations ~= false
+                                    self.ai_helper:saveSettings({ entity_cat_locations = not curr })
+                                    if self.scanBookForEntities then self:scanBookForEntities(true) end
+                                end
+                            },
+                            {
+                                text = self.loc:t("entity_cat_terms") or "Terms",
+                                checked_func = function()
+                                    return self.ai_helper.settings.entity_cat_terms ~= false
+                                end,
+                                callback = function()
+                                    local curr = self.ai_helper.settings.entity_cat_terms ~= false
+                                    self.ai_helper:saveSettings({ entity_cat_terms = not curr })
+                                    if self.scanBookForEntities then self:scanBookForEntities(true) end
+                                end
+                            },
                         }
                     }
                 },

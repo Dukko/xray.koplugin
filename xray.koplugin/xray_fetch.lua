@@ -310,8 +310,9 @@ function M:_processSingleWordResult(result, text, book_text, current_page)
             updated.book_type = self.book_type or updated.book_type
             updated.author_info = self.author_info or updated.author_info
             updated.last_fetch_page = updated.last_fetch_page
-            
+
             self.cache_manager:asyncSaveCache(self.ui.document.file, updated)
+            if self.scanBookForEntities then self:scanBookForEntities() end
         end
         
         -- Always show result if it's valid, even if it didn't merge into a target_list
@@ -942,6 +943,7 @@ function M:finalizeXRayData(final_book_data, title, author, book_text, is_update
 
     if not self.cache_manager then self.cache_manager = require(plugin_path .. "xray_cachemanager"):new() end
     local cache_saved = self.cache_manager:asyncSaveCache(self.ui.document.file, updated_data)
+    if self.scanBookForEntities then self:scanBookForEntities() end
 
     -- If book is part of a series, update this book's entry in SeriesCache
     if self.series_manager and (updated_data.series_slug or (self.ui and self.ui.document)) then
@@ -1292,8 +1294,9 @@ function M:fetchMoreCharacters()
             updated_data.book_type = self.book_type or updated_data.book_type
             updated_data.timeline = self.timeline or updated_data.timeline
             updated_data.author_info = self.author_info or updated_data.author_info
-            
+
             self.cache_manager:asyncSaveCache(self.ui.document.file, updated_data)
+            if self.scanBookForEntities then self:scanBookForEntities() end
 
             local current_page = self.ui and self.ui.getCurrentPage and self.ui:getCurrentPage() or 1
             local total_pages = self.ui and self.ui.document and self.ui.document.getPageCount and self.ui.document:getPageCount() or 1
@@ -1445,9 +1448,10 @@ function M:fetchMoreTerms()
             updated_data.book_type = self.book_type or updated_data.book_type
             updated_data.timeline = self.timeline or updated_data.timeline
             updated_data.author_info = self.author_info or updated_data.author_info
-            
+
             self.cache_manager:asyncSaveCache(self.ui.document.file, updated_data)
-            
+            if self.scanBookForEntities then self:scanBookForEntities() end
+
             local added_msg = self.loc:t("msg_added_terms", new_count)
             UIManager:show(InfoMessage:new{ text = added_msg, timeout = 3 })
 
@@ -1729,6 +1733,7 @@ function M:mergeSeriesContext(cache_data, series_info)
         cache.timeline = self.timeline
         self.cache_manager:asyncSaveCache(book_path, cache)
         self.book_data = cache
+        if self.scanBookForEntities then self:scanBookForEntities() end
     end
 end
 
