@@ -11,8 +11,11 @@ local logger      = require("logger")
 -- ---------------------------------------------------------------------------
 -- Configuration
 -- ---------------------------------------------------------------------------
-local GITHUB_OWNER = "ultimatejimmy"
-local GITHUB_REPO  = "koreader-xray-plugin"
+-- Points at the Entity Footnotes patch fork, not upstream, so the built-in
+-- update checker offers new patch releases instead of silently proposing to
+-- reinstall vanilla xray.koplugin over this patch.
+local GITHUB_OWNER = "Dukko"
+local GITHUB_REPO  = "xray.koplugin"
 local ASSET_NAME   = "xray.koplugin.zip"
 
 -- Cache validity time in seconds. 0 = disable cache.
