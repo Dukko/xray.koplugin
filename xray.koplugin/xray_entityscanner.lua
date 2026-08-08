@@ -150,9 +150,30 @@ end
 function M:clearEntityUnderlines()
     self.entity_boxes = nil
     self.entity_xp_matches = nil
+    self.entity_matches_by_page = nil
     if self.ui and self.ui.view and self.ui.view.dialog then
         UIManager:setDirty(self.ui.view.dialog, "ui")
     end
+end
+
+-- Buckets matches by page once (at scan/load time) so _resolveEntityHighlightBoxes only has
+-- to call the expensive getScreenBoxesFromPositions on matches near the current page, instead
+-- of every match in the whole book on every single page turn. Only rolling (reflowable)
+-- documents expose the cheap doc:getPageFromXPointer lookup this relies on; paginated
+-- documents (PDF etc.) fall back to the unbucketed full-list resolve.
+local function _buildMatchesByPage(self, doc, matches)
+    if not self.ui or not self.ui.rolling or not doc or not doc.getPageFromXPointer then
+        return nil
+    end
+    local by_page = {}
+    for _, m in ipairs(matches) do
+        local ok, page = pcall(doc.getPageFromXPointer, doc, m.start_xp)
+        if ok and page then
+            by_page[page] = by_page[page] or {}
+            table.insert(by_page[page], m)
+        end
+    end
+    return by_page
 end
 
 function M:mountEntityUnderlineOverlay()
@@ -200,10 +221,25 @@ function M:_resolveEntityHighlightBoxes()
         return
     end
 
+    -- If matches are bucketed by page, only resolve the handful near the current page
+    -- instead of every match in the whole book (a name mentioned hundreds of times would
+    -- otherwise make every page turn scan the entire book's match list).
+    local matches_to_resolve = self.entity_xp_matches
+    if self.entity_matches_by_page then
+        local page = _getCurrentPage(self)
+        matches_to_resolve = {}
+        for _, pg in ipairs({ page - 1, page, page + 1 }) do
+            local bucket = self.entity_matches_by_page[pg]
+            if bucket then
+                for _, m in ipairs(bucket) do table.insert(matches_to_resolve, m) end
+            end
+        end
+    end
+
     -- Resolve each match to its screen box(es) first, keeping multi-line-wrapped matches
     -- grouped together (a single match can produce several boxes, one per visual line).
     local groups = {}
-    for _, match in ipairs(self.entity_xp_matches) do
+    for _, match in ipairs(matches_to_resolve) do
         local ok, boxes = pcall(doc.getScreenBoxesFromPositions, doc, match.start_xp, match.end_xp, true)
         if ok and boxes and #boxes > 0 then
             local group_boxes = {}
@@ -409,6 +445,7 @@ function M:loadEntityCache(expected_sig)
     f:close()
 
     self.entity_xp_matches = matches
+    self.entity_matches_by_page = _buildMatchesByPage(self, self.ui and self.ui.document, matches)
     self._entity_box_cache_sig = nil
     log("loadEntityCache: loaded " .. tostring(#matches) .. " matches from cache")
     if self.ui and self.ui.view then
@@ -489,6 +526,7 @@ function M:scanBookForEntities(force)
         -- _drawEntityUnderlines doesn't treat this as "never scanned" and rescan every repaint.
         self.entity_xp_matches = {}
         self.entity_boxes = {}
+        self.entity_matches_by_page = nil
         self._entity_box_cache_sig = nil
         if self.ui and self.ui.view and self.ui.view.dialog then
             UIManager:setDirty(self.ui.view.dialog, "ui")
@@ -596,6 +634,7 @@ function M:scanBookForEntities(force)
             end
 
             self.entity_xp_matches = xp_matches
+            self.entity_matches_by_page = _buildMatchesByPage(self, doc, xp_matches)
             self._entity_box_cache_sig = nil
             log("scanBookForEntities: found " .. tostring(#xp_matches) .. " entity mentions")
             progress_msg:reportProgress(95)
