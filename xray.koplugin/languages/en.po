@@ -248,9 +248,6 @@ msgstr "'%s' was not found as a character or location."
 msgid "entity_scanning_book"
 msgstr "Scanning book for footnotes..."
 
-msgid "entity_scanning_title"
-msgstr "X-Ray: Entity Footnotes"
-
 msgid "entity_style_settings"
 msgstr "Style & Underline Settings"
 
