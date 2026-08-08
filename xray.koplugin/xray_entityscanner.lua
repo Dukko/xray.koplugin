@@ -199,12 +199,16 @@ function M:_resolveEntityHighlightBoxes()
         return
     end
 
-    local resolved = {}
+    -- Resolve each match to its screen box(es) first, keeping multi-line-wrapped matches
+    -- grouped together (a single match can produce several boxes, one per visual line).
+    local groups = {}
     for _, match in ipairs(self.entity_xp_matches) do
         local ok, boxes = pcall(doc.getScreenBoxesFromPositions, doc, match.start_xp, match.end_xp, true)
-        if ok and boxes then
+        if ok and boxes and #boxes > 0 then
+            local group_boxes = {}
+            local top_y, top_x = nil, nil
             for _, box in ipairs(boxes) do
-                table.insert(resolved, {
+                table.insert(group_boxes, {
                     x = box.x,
                     y = box.y,
                     w = box.w,
@@ -213,9 +217,39 @@ function M:_resolveEntityHighlightBoxes()
                     category = match.category,
                     entity_name = match.entity_name,
                 })
+                if not top_y or box.y < top_y or (box.y == top_y and box.x < top_x) then
+                    top_y, top_x = box.y, box.x
+                end
+            end
+            table.insert(groups, {
+                key = (match.category or "") .. "|" .. (match.entity_name or ""),
+                sort_y = top_y,
+                sort_x = top_x,
+                boxes = group_boxes,
+            })
+        end
+    end
+
+    -- Reading order (top-to-bottom, then left-to-right) so the per-page dedup below keeps
+    -- whichever mention appears first on the page, not an arbitrary one.
+    table.sort(groups, function(a, b)
+        if a.sort_y ~= b.sort_y then return a.sort_y < b.sort_y end
+        return a.sort_x < b.sort_x
+    end)
+
+    -- Only underline the first occurrence of a given entity per page - repeated mentions of
+    -- the same name in the same paragraph/page would otherwise clutter the text.
+    local seen = {}
+    local resolved = {}
+    for _, group in ipairs(groups) do
+        if not seen[group.key] then
+            seen[group.key] = true
+            for _, box in ipairs(group.boxes) do
+                table.insert(resolved, box)
             end
         end
     end
+
     self.entity_boxes = resolved
 end
 
