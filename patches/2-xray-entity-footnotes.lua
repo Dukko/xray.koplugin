@@ -76,7 +76,10 @@ local function _getCurrentPage(plugin)
 end
 
 local function escape_pattern(s)
-    local esc = s:gsub("([%-%+%.%?%*%^%$%(%)%[%]%%%\\])", "%%%1")
+    -- Backslash-escape for the search engine's own regex flavor, not Lua patterns -
+    -- a leading "%" here (Lua's own escape prefix) would be passed through literally
+    -- instead of escaping the special character for the engine doing the matching.
+    local esc = s:gsub("([%-%+%.%?%*%^%$%(%)%[%]%%%\\])", "\\%1")
     esc = esc:gsub("%s+", "\\s+")
     return esc
 end
@@ -159,15 +162,24 @@ local function _buildChunks(terms)
         local patterns = {}
         for _, c in ipairs(chunks) do
             local body = table.concat(c, "|")
-            table.insert(patterns, wrap_both and ("\\b(" .. body .. ")\\b") or ("(" .. body .. ")"))
+            -- crengine's findAllText regex doesn't reliably honor \b as a zero-width word
+            -- boundary assertion (a short alias like "Han" can still match as a bare
+            -- substring inside "than"). Character classes are a much more basic regex
+            -- feature and work reliably, so boundaries are enforced by capturing one
+            -- literal non-word character (or start/end of text) on each side instead.
+            -- The captured boundary chars get stripped back off in finishScan below.
+            table.insert(patterns, wrap_both
+                and ("(^|[^A-Za-z0-9_])(" .. body .. ")([^A-Za-z0-9_]|$)")
+                or ("(" .. body .. ")"))
         end
         return patterns
     end
 
+    local bounded_patterns = chunk_list(boundary_both, true)
     local patterns = {}
-    for _, p in ipairs(chunk_list(boundary_both, true)) do table.insert(patterns, p) end
+    for _, p in ipairs(bounded_patterns) do table.insert(patterns, p) end
     for _, p in ipairs(chunk_list(boundary_none, false)) do table.insert(patterns, p) end
-    return patterns
+    return patterns, #bounded_patterns
 end
 
 -- ===== Overlay mount (paintTo) =====
@@ -569,7 +581,7 @@ function M:scanBookForEntities(force)
     -- only scans once per book open, this scan re-runs every time new entity data arrives
     -- (fetchMoreCharacters/fetchMoreTerms/mergeSeriesContext), so it must not freeze
     -- reading/input while it works.
-    local patterns = _buildChunks(terms)
+    local patterns, bounded_pattern_count = _buildChunks(terms)
     local total_patterns = math.max(1, #patterns)
     local hits = {}
     local idx = 0
@@ -588,6 +600,11 @@ function M:scanBookForEntities(force)
             local xp_matches = {}
             for _, hit in pairs(unique_hits) do
                 local matched = _normalize(hit.matched_text or "")
+                if hit.__bounded then
+                    -- Strip the boundary character(s) the pattern captured on purpose
+                    -- (see _buildChunks) before looking the term up.
+                    matched = matched:gsub("^[^%w]+", ""):gsub("[^%w]+$", "")
+                end
                 local entry = lookup[matched:lower()]
                 if entry then
                     table.insert(xp_matches, {
@@ -643,11 +660,15 @@ function M:scanBookForEntities(force)
             return
         end
 
+        local is_bounded = idx <= bounded_pattern_count
         local ok1, hits1 = pcall(function()
             return doc:findAllText(pat, true, 0, 5000, true)
         end)
         if ok1 and hits1 then
-            for _, h in ipairs(hits1) do table.insert(hits, h) end
+            for _, h in ipairs(hits1) do
+                h.__bounded = is_bounded
+                table.insert(hits, h)
+            end
         else
             log("scanBookForEntities: findAllText pcall failed (non-fatal): " .. tostring(hits1))
         end
