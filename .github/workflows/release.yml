@@ -10,7 +10,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true # Opt-in to Node 24 to clear deprecation warnings
 
 jobs:
-  build:
+  release:
     name: Create Release
     runs-on: ubuntu-latest
     permissions:
@@ -18,20 +18,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Fetch all history for all tags and branches
-
-      - name: Create Plugin Archive
-        run: |
-          # Package the plugin directory into a zip file
-          # Excluding hidden files and git metadata
-          zip -r xray.koplugin.zip xray.koplugin -x "*.git*" "*/.*"
 
       - name: Create Draft Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: xray.koplugin.zip
+          files: patches/2-xray-entity-footnotes.lua
           draft: true
           prerelease: ${{ contains(github.ref_name, '-beta') }}
           generate_release_notes: true

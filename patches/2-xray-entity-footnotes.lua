@@ -1,8 +1,40 @@
--- xray_entityscanner.lua - Underlines AI-identified entities (characters, historical figures,
--- locations, terms) in the reading text and shows a footnote-style popup with the AI
--- description on tap. Mirrors the scan/cache/underline/tap architecture of xray_unitscanner.lua,
--- but matches against entities already extracted into self.characters / self.historical_figures /
--- self.locations / self.terms instead of doing its own AI call.
+--[[
+Entity Footnotes patch for ultimatejimmy/xray.koplugin
+https://github.com/Dukko/xray.koplugin
+
+Underlines AI-identified characters, historical figures, locations, and terms
+directly in the reading text and shows a footnote-style popup with the AI
+description on tap - the same in-text interaction the plugin already has for
+unit conversions. Runs as a chunked, non-blocking scan so page turns stay
+responsive.
+
+Install: copy this file into koreader/patches/2-xray-entity-footnotes.lua
+Requires: the official xray.koplugin plugin already installed and enabled.
+Background: https://github.com/ultimatejimmy/xray.koplugin/pull/100
+
+This patch does not modify xray.koplugin at all. It monkey-patches the
+plugin's shared class table at runtime, the same technique xray.koplugin
+itself already uses internally for its unit-converter underline/tap
+handling (see xray_unitscanner.lua's view.paintTo and highlight.onTap
+wraps). All credit for X-Ray itself goes to ultimatejimmy.
+]]
+
+local ok_main, XRayPlugin = pcall(require, "plugins.xray.koplugin.main")
+if not ok_main or not XRayPlugin then
+    local ok_logger_boot, logger_boot = pcall(require, "logger")
+    if ok_logger_boot then
+        logger_boot.warn("xray-entity-footnotes patch: xray.koplugin not found, skipping")
+    end
+    return
+end
+
+local ok_xlog, XRayLogger = pcall(require, "plugins.xray.koplugin.xray_logger")
+
+local function log(msg)
+    if ok_xlog and XRayLogger then
+        XRayLogger:log("EntityFootnotesPatch: " .. tostring(msg))
+    end
+end
 
 local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
@@ -16,13 +48,7 @@ local TextBoxWidget = require("ui/widget/textboxwidget")
 local Font = require("ui/font")
 local Geom = require("ui/geometry")
 local DocSettings = require("docsettings")
-
-local plugin_path = ((...) or ""):match("(.-)[^%.]+$") or ""
-local XRayLogger = require(plugin_path .. "xray_logger")
-
-local function log(msg)
-    XRayLogger:log("EntityScanner: " .. tostring(msg))
-end
+local OverlapGroup = require("ui/widget/overlapgroup")
 
 local M = {}
 
@@ -826,7 +852,6 @@ function EntityFootnote:init()
         }
     }
 
-    local OverlapGroup = require("ui/widget/overlapgroup")
     local children = { dimen = Geom:new{ w = sw, h = sh }, card }
     if arrow then table.insert(children, arrow) end
     self[1] = OverlapGroup:new(children)
@@ -950,4 +975,125 @@ function M:_handleEntityTap(ges)
     return false
 end
 
-return M
+-- Apply the mixin onto the shared plugin class table, exactly like xray.koplugin's own
+-- main.lua does for its built-in modules (safeRequireMixin/applyMixin).
+for k, v in pairs(M) do
+    XRayPlugin[k] = v
+end
+
+-- Hook per-document init: mounts the underline/tap overlays and kicks off the first scan,
+-- the same setup steps the plugin's own init already performs for the unit converter.
+local orig_init = XRayPlugin.init
+function XRayPlugin:init(...)
+    local ret = orig_init(self, ...)
+    local ok, err = pcall(function()
+        local settings = self.ai_helper and self.ai_helper.settings or {}
+        if self.mountEntityUnderlineOverlay then self:mountEntityUnderlineOverlay() end
+        if self.mountEntityTapHandler then self:mountEntityTapHandler() end
+        if self.scanBookForEntities and settings.entity_footnotes_enabled ~= false then
+            self:scanBookForEntities()
+        end
+    end)
+    if not ok then
+        log("init hook error: " .. tostring(err))
+    end
+    return ret
+end
+
+-- Hook the X-Ray menu: getSubMenuItems is called fresh every time the menu opens, so this
+-- doesn't need to run at any particular startup phase relative to menu construction.
+local orig_getSubMenuItems = XRayPlugin.getSubMenuItems
+function XRayPlugin:getSubMenuItems(...)
+    local items = orig_getSubMenuItems(self, ...)
+    if not items then return items end
+
+    local entity_menu_entry = {
+        is_entity_footnotes = true,
+        text = self.loc:t("menu_entity_footnotes") or "Entity Footnotes",
+        keep_menu_open = true,
+        sub_item_table = {
+            {
+                text = self.loc:t("entity_footnotes_enabled") or "Enable Entity Footnotes",
+                checked_func = function()
+                    return self.ai_helper.settings.entity_footnotes_enabled ~= false
+                end,
+                callback = function()
+                    local current = self.ai_helper.settings.entity_footnotes_enabled ~= false
+                    self.ai_helper:saveSettings({ entity_footnotes_enabled = not current })
+                    if self.scanBookForEntities then self:scanBookForEntities() end
+                end
+            },
+            {
+                text = self.loc:t("entity_manual_scan_button") or "Scan/Rescan",
+                keep_menu_open = true,
+                callback = function()
+                    if self.scanBookForEntities then self:scanBookForEntities(true) end
+                end,
+                separator = true,
+            },
+            {
+                text = self.loc:t("entity_style_settings") or "Style & Underline Settings",
+                keep_menu_open = true,
+                callback = function()
+                    self:showUnitStyleCard()
+                end
+            },
+            {
+                text = self.loc:t("menu_entity_categories") or "Entity Categories",
+                keep_menu_open = true,
+                sub_item_table = {
+                    {
+                        text = self.loc:t("entity_cat_characters") or "Characters",
+                        checked_func = function()
+                            return self.ai_helper.settings.entity_cat_characters ~= false
+                        end,
+                        callback = function()
+                            local curr = self.ai_helper.settings.entity_cat_characters ~= false
+                            self.ai_helper:saveSettings({ entity_cat_characters = not curr })
+                            if self.scanBookForEntities then self:scanBookForEntities(true) end
+                        end
+                    },
+                    {
+                        text = self.loc:t("entity_cat_historical_figures") or "Historical Figures",
+                        checked_func = function()
+                            return self.ai_helper.settings.entity_cat_historical_figures ~= false
+                        end,
+                        callback = function()
+                            local curr = self.ai_helper.settings.entity_cat_historical_figures ~= false
+                            self.ai_helper:saveSettings({ entity_cat_historical_figures = not curr })
+                            if self.scanBookForEntities then self:scanBookForEntities(true) end
+                        end
+                    },
+                    {
+                        text = self.loc:t("entity_cat_locations") or "Locations",
+                        checked_func = function()
+                            return self.ai_helper.settings.entity_cat_locations ~= false
+                        end,
+                        callback = function()
+                            local curr = self.ai_helper.settings.entity_cat_locations ~= false
+                            self.ai_helper:saveSettings({ entity_cat_locations = not curr })
+                            if self.scanBookForEntities then self:scanBookForEntities(true) end
+                        end
+                    },
+                    {
+                        text = self.loc:t("entity_cat_terms") or "Terms",
+                        checked_func = function()
+                            return self.ai_helper.settings.entity_cat_terms ~= false
+                        end,
+                        callback = function()
+                            local curr = self.ai_helper.settings.entity_cat_terms ~= false
+                            self.ai_helper:saveSettings({ entity_cat_terms = not curr })
+                            if self.scanBookForEntities then self:scanBookForEntities(true) end
+                        end
+                    },
+                }
+            }
+        },
+        separator = true,
+    }
+
+    table.insert(items, math.max(1, #items), entity_menu_entry)
+    return items
+end
+
+log("Entity Footnotes patch loaded")
