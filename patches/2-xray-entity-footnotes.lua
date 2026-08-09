@@ -656,7 +656,18 @@ function M:scanBookForEntities(force)
         if ok1 and hits1 then
             for _, h in ipairs(hits1) do table.insert(hits, h) end
         else
-            log("scanBookForEntities: findAllText pcall failed (non-fatal): " .. tostring(hits1))
+            -- doc:checkRegex validates a pattern against crengine's own regex compiler
+            -- without searching, so a mismatch between "checkRegex says fine" and
+            -- "findAllText still failed" pins the failure down to the search call itself
+            -- rather than the pattern being malformed.
+            local regex_check = "n/a"
+            if doc.checkRegex then
+                local ok_chk, chk = pcall(function() return doc:checkRegex(pat) end)
+                regex_check = ok_chk and tostring(chk) or ("pcall error: " .. tostring(chk))
+            end
+            log("scanBookForEntities: findAllText failed chunk=" .. idx .. "/" .. total_patterns
+                .. " pattern_len=" .. #pat .. " checkRegex=" .. regex_check
+                .. " result=" .. tostring(hits1))
         end
 
         -- Yield back to the event loop between chunks so page turns, taps, and menu
@@ -1016,20 +1027,17 @@ local ENTITY_FOOTNOTES_EN_STRINGS = {
     entity_no_description = "No description available yet.",
 }
 
--- Hook per-document init: mounts the underline/tap overlays and kicks off the first scan,
--- the same setup steps the plugin's own init already performs for the unit converter.
-local orig_init = XRayPlugin.init
-function XRayPlugin:init(...)
-    local ret = orig_init(self, ...)
-
-    -- Each step below is pcall'd separately (rather than one big pcall around all of
-    -- them) so a failure in one doesn't hide whether the others ran, and so the log
-    -- says specifically which step broke instead of just "something failed".
-
+-- userpatch.registerPatchPluginFunc calls the plugin's own createPluginInstance (which
+-- runs :init()) BEFORE calling this patch function - so for the very first xray instance
+-- created after KOReader starts, wrapping :init() below is already too late; it only
+-- takes effect from the second book/instance onward within the same session. Menu access
+-- (getSubMenuItems) has no such gap: a menu can't be opened before the class table has
+-- already been patched, so the actual localization/mount setup lives here, in a function
+-- called from both hooks, idempotent so it's cheap to call from either or both.
+local function ensureEntityFootnotesSetup(self)
     local ok1, err1 = pcall(function()
-        -- self.loc:init() (called by orig_init above) reloads self.loc.translations
-        -- from scratch on every book open, so this has to be redone every time too,
-        -- not just once.
+        -- self.loc:init() reloads self.loc.translations from scratch on every book open,
+        -- so this can't be a one-time thing - it has to be redone whenever that happens.
         if not self.loc or not self.loc.translations then
             log("loc injection skipped: self.loc or self.loc.translations missing")
             return
@@ -1041,7 +1049,9 @@ function XRayPlugin:init(...)
                 injected = injected + 1
             end
         end
-        log("loc injection: " .. injected .. " key(s) written, current_language=" .. tostring(self.loc.current_language))
+        if injected > 0 then
+            log("loc injection: " .. injected .. " key(s) written, current_language=" .. tostring(self.loc.current_language))
+        end
     end)
     if not ok1 then log("loc injection error: " .. tostring(err1)) end
 
@@ -1053,19 +1063,30 @@ function XRayPlugin:init(...)
 
     local ok3, err3 = pcall(function()
         local settings = self.ai_helper and self.ai_helper.settings or {}
-        if self.scanBookForEntities and settings.entity_footnotes_enabled ~= false then
+        if self.scanBookForEntities and settings.entity_footnotes_enabled ~= false
+                and not self.entity_xp_matches and not self._entity_scan_in_progress then
             self:scanBookForEntities()
         end
     end)
     if not ok3 then log("initial scan error: " .. tostring(err3)) end
+end
 
+-- Hook per-document init: covers the mount/scan/loc setup for the second book onward
+-- within a session (see the comment on ensureEntityFootnotesSetup above for why the
+-- very first book of a session can't rely on this alone).
+local orig_init = XRayPlugin.init
+function XRayPlugin:init(...)
+    local ret = orig_init(self, ...)
+    ensureEntityFootnotesSetup(self)
     return ret
 end
 
 -- Hook the X-Ray menu: getSubMenuItems is called fresh every time the menu opens, so this
--- doesn't need to run at any particular startup phase relative to menu construction.
+-- doesn't need to run at any particular startup phase relative to menu construction, and
+-- reliably runs even for the first book of a session (see ensureEntityFootnotesSetup).
 local orig_getSubMenuItems = XRayPlugin.getSubMenuItems
 function XRayPlugin:getSubMenuItems(...)
+    ensureEntityFootnotesSetup(self)
     local items = orig_getSubMenuItems(self, ...)
     if not items then return items end
 
