@@ -75,10 +75,14 @@ local function _getCurrentPage(plugin)
 end
 
 local function escape_pattern(s)
-    -- Backslash-escape for the search engine's own regex flavor, not Lua patterns -
-    -- a leading "%" here (Lua's own escape prefix) would be passed through literally
-    -- instead of escaping the special character for the engine doing the matching.
-    local esc = s:gsub("([%-%+%.%?%*%^%$%(%)%[%]%%%\\])", "\\%1")
+    -- Backslash-escape ECMAScript regex SyntaxCharacters for the search engine's own
+    -- regex flavor (crengine's findAllText, backed by SRELL, srell::regex::ECMAScript) -
+    -- not Lua patterns. "-" and "%" are NOT special outside a character class in
+    -- ECMAScript regex, so escaping them produces "\-" and "\%", and "\%" specifically
+    -- isn't a recognized escape sequence - SRELL rejects the whole pattern as invalid
+    -- (doc:checkRegex returns error_escape/102) the moment any term contains one,
+    -- silently making findAllText return zero hits for that entire chunk.
+    local esc = s:gsub("([%^%$%.%*%+%?%(%)%[%]%{%}|\\])", "\\%1")
     esc = esc:gsub("%s+", "\\s+")
     return esc
 end
@@ -668,6 +672,7 @@ function M:scanBookForEntities(force)
             log("scanBookForEntities: findAllText failed chunk=" .. idx .. "/" .. total_patterns
                 .. " pattern_len=" .. #pat .. " checkRegex=" .. regex_check
                 .. " result=" .. tostring(hits1))
+            log("scanBookForEntities: failed pattern text: " .. pat)
         end
 
         -- Yield back to the event loop between chunks so page turns, taps, and menu
