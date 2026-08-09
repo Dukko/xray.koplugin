@@ -13,27 +13,26 @@ Requires: the official xray.koplugin plugin already installed and enabled.
 Background: https://github.com/ultimatejimmy/xray.koplugin/pull/100
 
 This patch does not modify xray.koplugin at all. It monkey-patches the
-plugin's shared class table at runtime, the same technique xray.koplugin
-itself already uses internally for its unit-converter underline/tap
-handling (see xray_unitscanner.lua's view.paintTo and highlight.onTap
-wraps). All credit for X-Ray itself goes to ultimatejimmy.
+plugin's shared class table at runtime, via KOReader's own
+userpatch.registerPatchPluginFunc API (frontend/userpatch.lua) - the
+mechanism KOReader itself provides specifically for patching a plugin's
+class table from outside, since plugins are dofile()'d rather than
+require()'d and never end up in Lua's module cache. All credit for
+X-Ray itself goes to ultimatejimmy.
 ]]
 
-local ok_main, XRayPlugin = pcall(require, "plugins.xray.koplugin.main")
-if not ok_main or not XRayPlugin then
+local ok_userpatch, userpatch = pcall(require, "userpatch")
+if not ok_userpatch or not userpatch or not userpatch.registerPatchPluginFunc then
     local ok_logger_boot, logger_boot = pcall(require, "logger")
     if ok_logger_boot then
-        logger_boot.warn("xray-entity-footnotes patch: xray.koplugin not found, skipping")
+        logger_boot.warn("xray-entity-footnotes patch: userpatch API not available, skipping")
     end
     return
 end
 
-local ok_xlog, XRayLogger = pcall(require, "plugins.xray.koplugin.xray_logger")
-
+local logger = require("logger")
 local function log(msg)
-    if ok_xlog and XRayLogger then
-        XRayLogger:log("EntityFootnotesPatch: " .. tostring(msg))
-    end
+    logger.info("EntityFootnotesPatch: " .. tostring(msg))
 end
 
 local UIManager = require("ui/uimanager")
@@ -996,6 +995,14 @@ function M:_handleEntityTap(ges)
     return false
 end
 
+-- userpatch.registerPatchPluginFunc hands us the actual, in-use plugin class table
+-- (via PluginLoader:createPluginInstance) every time a new instance is about to be
+-- created - this runs once per book/FileManager open, so the guard below makes sure
+-- we only apply our monkey-patches to the class table once, not once per open.
+userpatch.registerPatchPluginFunc("xray", function(XRayPlugin)
+if XRayPlugin.__entity_footnotes_patched then return end
+XRayPlugin.__entity_footnotes_patched = true
+
 -- Apply the mixin onto the shared plugin class table, exactly like xray.koplugin's own
 -- main.lua does for its built-in modules (safeRequireMixin/applyMixin).
 for k, v in pairs(M) do
@@ -1117,4 +1124,7 @@ function XRayPlugin:getSubMenuItems(...)
     return items
 end
 
-log("Entity Footnotes patch loaded")
+log("applied to xray.koplugin class table")
+end)
+
+log("Entity Footnotes patch registered")
