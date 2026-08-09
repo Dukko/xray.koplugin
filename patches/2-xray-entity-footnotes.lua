@@ -161,24 +161,15 @@ local function _buildChunks(terms)
         local patterns = {}
         for _, c in ipairs(chunks) do
             local body = table.concat(c, "|")
-            -- crengine's findAllText regex doesn't reliably honor \b as a zero-width word
-            -- boundary assertion (a short alias like "Han" can still match as a bare
-            -- substring inside "than"). Character classes are a much more basic regex
-            -- feature and work reliably, so boundaries are enforced by capturing one
-            -- literal non-word character (or start/end of text) on each side instead.
-            -- The captured boundary chars get stripped back off in finishScan below.
-            table.insert(patterns, wrap_both
-                and ("(^|[^A-Za-z0-9_])(" .. body .. ")([^A-Za-z0-9_]|$)")
-                or ("(" .. body .. ")"))
+            table.insert(patterns, wrap_both and ("\\b(" .. body .. ")\\b") or ("(" .. body .. ")"))
         end
         return patterns
     end
 
-    local bounded_patterns = chunk_list(boundary_both, true)
     local patterns = {}
-    for _, p in ipairs(bounded_patterns) do table.insert(patterns, p) end
+    for _, p in ipairs(chunk_list(boundary_both, true)) do table.insert(patterns, p) end
     for _, p in ipairs(chunk_list(boundary_none, false)) do table.insert(patterns, p) end
-    return patterns, #bounded_patterns
+    return patterns
 end
 
 -- ===== Overlay mount (paintTo) =====
@@ -557,6 +548,11 @@ function M:scanBookForEntities(force)
     end
 
     local terms, lookup = _collectEntityTerms(self, settings)
+    log("scanBookForEntities: collected " .. #terms .. " unique term(s) from "
+        .. (#(self.characters or {})) .. " character(s), "
+        .. (#(self.historical_figures or {})) .. " historical figure(s), "
+        .. (#(self.locations or {})) .. " location(s), "
+        .. (#(self.terms or {})) .. " term(s)")
     if #terms == 0 then
         -- Mark as "scanned, nothing to show" (not nil) so the paint-time check in
         -- _drawEntityUnderlines doesn't treat this as "never scanned" and rescan every repaint.
@@ -580,7 +576,7 @@ function M:scanBookForEntities(force)
     -- only scans once per book open, this scan re-runs every time new entity data arrives
     -- (fetchMoreCharacters/fetchMoreTerms/mergeSeriesContext), so it must not freeze
     -- reading/input while it works.
-    local patterns, bounded_pattern_count = _buildChunks(terms)
+    local patterns = _buildChunks(terms)
     local total_patterns = math.max(1, #patterns)
     local hits = {}
     local idx = 0
@@ -599,11 +595,6 @@ function M:scanBookForEntities(force)
             local xp_matches = {}
             for _, hit in pairs(unique_hits) do
                 local matched = _normalize(hit.matched_text or "")
-                if hit.__bounded then
-                    -- Strip the boundary character(s) the pattern captured on purpose
-                    -- (see _buildChunks) before looking the term up.
-                    matched = matched:gsub("^[^%w]+", ""):gsub("[^%w]+$", "")
-                end
                 local entry = lookup[matched:lower()]
                 if entry then
                     table.insert(xp_matches, {
@@ -659,15 +650,11 @@ function M:scanBookForEntities(force)
             return
         end
 
-        local is_bounded = idx <= bounded_pattern_count
         local ok1, hits1 = pcall(function()
             return doc:findAllText(pat, true, 0, 5000, true)
         end)
         if ok1 and hits1 then
-            for _, h in ipairs(hits1) do
-                h.__bounded = is_bounded
-                table.insert(hits, h)
-            end
+            for _, h in ipairs(hits1) do table.insert(hits, h) end
         else
             log("scanBookForEntities: findAllText pcall failed (non-fatal): " .. tostring(hits1))
         end
@@ -1034,28 +1021,44 @@ local ENTITY_FOOTNOTES_EN_STRINGS = {
 local orig_init = XRayPlugin.init
 function XRayPlugin:init(...)
     local ret = orig_init(self, ...)
-    local ok, err = pcall(function()
+
+    -- Each step below is pcall'd separately (rather than one big pcall around all of
+    -- them) so a failure in one doesn't hide whether the others ran, and so the log
+    -- says specifically which step broke instead of just "something failed".
+
+    local ok1, err1 = pcall(function()
         -- self.loc:init() (called by orig_init above) reloads self.loc.translations
         -- from scratch on every book open, so this has to be redone every time too,
         -- not just once.
-        if self.loc and self.loc.translations then
-            for k, v in pairs(ENTITY_FOOTNOTES_EN_STRINGS) do
-                if not self.loc.translations[k] or self.loc.translations[k] == "" then
-                    self.loc.translations[k] = v
-                end
+        if not self.loc or not self.loc.translations then
+            log("loc injection skipped: self.loc or self.loc.translations missing")
+            return
+        end
+        local injected = 0
+        for k, v in pairs(ENTITY_FOOTNOTES_EN_STRINGS) do
+            if not self.loc.translations[k] or self.loc.translations[k] == "" then
+                self.loc.translations[k] = v
+                injected = injected + 1
             end
         end
+        log("loc injection: " .. injected .. " key(s) written, current_language=" .. tostring(self.loc.current_language))
+    end)
+    if not ok1 then log("loc injection error: " .. tostring(err1)) end
 
-        local settings = self.ai_helper and self.ai_helper.settings or {}
+    local ok2, err2 = pcall(function()
         if self.mountEntityUnderlineOverlay then self:mountEntityUnderlineOverlay() end
         if self.mountEntityTapHandler then self:mountEntityTapHandler() end
+    end)
+    if not ok2 then log("mount error: " .. tostring(err2)) end
+
+    local ok3, err3 = pcall(function()
+        local settings = self.ai_helper and self.ai_helper.settings or {}
         if self.scanBookForEntities and settings.entity_footnotes_enabled ~= false then
             self:scanBookForEntities()
         end
     end)
-    if not ok then
-        log("init hook error: " .. tostring(err))
-    end
+    if not ok3 then log("initial scan error: " .. tostring(err3)) end
+
     return ret
 end
 
