@@ -1009,12 +1009,43 @@ for k, v in pairs(M) do
     XRayPlugin[k] = v
 end
 
+-- xray.koplugin's own Localization:t() falls back to returning the raw key string
+-- itself for any key it doesn't recognize (translation = fallbacks[key] or key), never
+-- nil - so the "self.loc:t(key) or english_text" pattern used throughout this patch
+-- never actually falls through to our english_text. These entries get injected
+-- straight into the shared translations table below so :t() finds a real value
+-- before it ever reaches that fallback.
+local ENTITY_FOOTNOTES_EN_STRINGS = {
+    menu_entity_footnotes = "Entity Footnotes",
+    entity_footnotes_enabled = "Enable Entity Footnotes",
+    entity_manual_scan_button = "Scan/Rescan",
+    entity_style_settings = "Style & Underline Settings",
+    menu_entity_categories = "Entity Categories",
+    entity_cat_characters = "Characters",
+    entity_cat_historical_figures = "Historical Figures",
+    entity_cat_locations = "Locations",
+    entity_cat_terms = "Terms",
+    entity_scanning_book = "Scanning book for footnotes...",
+    entity_no_description = "No description available yet.",
+}
+
 -- Hook per-document init: mounts the underline/tap overlays and kicks off the first scan,
 -- the same setup steps the plugin's own init already performs for the unit converter.
 local orig_init = XRayPlugin.init
 function XRayPlugin:init(...)
     local ret = orig_init(self, ...)
     local ok, err = pcall(function()
+        -- self.loc:init() (called by orig_init above) reloads self.loc.translations
+        -- from scratch on every book open, so this has to be redone every time too,
+        -- not just once.
+        if self.loc and self.loc.translations then
+            for k, v in pairs(ENTITY_FOOTNOTES_EN_STRINGS) do
+                if not self.loc.translations[k] or self.loc.translations[k] == "" then
+                    self.loc.translations[k] = v
+                end
+            end
+        end
+
         local settings = self.ai_helper and self.ai_helper.settings or {}
         if self.mountEntityUnderlineOverlay then self:mountEntityUnderlineOverlay() end
         if self.mountEntityTapHandler then self:mountEntityTapHandler() end
