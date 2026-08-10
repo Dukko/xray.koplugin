@@ -92,7 +92,12 @@ local function _normalize(s)
 end
 
 -- Builds a name/alias -> {entity, category, canonical} lookup plus the flat list of
--- unique lowercase search terms, from the already-fetched entity lists.
+-- unique search terms (original case preserved), from the already-fetched entity lists.
+-- Terms are matched case-sensitively (see step()) so common lowercase words that happen
+-- to share spelling with a proper noun ("black" the color vs "Black" the character) and
+-- lowercase substrings inside unrelated words ("than" containing "han") don't false-match
+-- - entity names and aliases are capitalized proper nouns in practice, so requiring the
+-- original case is a much tighter filter than \b word boundaries alone.
 local function _collectEntityTerms(self, settings)
     local groups = {
         { list = self.characters, category = "character", enabled = settings.entity_cat_characters ~= false },
@@ -120,7 +125,7 @@ local function _collectEntityTerms(self, settings)
                         local lower = clean:lower()
                         if not lookup[lower] then
                             lookup[lower] = { entity = entity, category = group.category, canonical = entity.name }
-                            table.insert(terms, lower)
+                            table.insert(terms, clean)
                         end
                     end
                 end
@@ -654,8 +659,10 @@ function M:scanBookForEntities(force)
             return
         end
 
+        -- case_insensitive=false: entity names/aliases are matched in their original
+        -- (proper-noun) case only, see _collectEntityTerms.
         local ok1, hits1 = pcall(function()
-            return doc:findAllText(pat, true, 0, 5000, true)
+            return doc:findAllText(pat, false, 0, 5000, true)
         end)
         if ok1 and hits1 then
             for _, h in ipairs(hits1) do table.insert(hits, h) end

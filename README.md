@@ -55,3 +55,7 @@ repo (Watch -> Custom -> Releases) on GitHub to get notified when a new version 
   KOReader language.
 - Scanning is chunked to avoid blocking input, but on slower e-ink devices with very large
   entity lists it can still be briefly perceptible.
+- Matching is case-sensitive (a name only matches its original capitalization) to avoid
+  false positives from common words or names that are substrings of unrelated words (e.g.
+  "black" the color vs. "Black" the character, or "han" inside "than"). As a trade-off,
+  occurrences in ALL-CAPS text (some chapter headers or title pages) won't be underlined.
